@@ -1,5 +1,3 @@
-[English](README.md) | [Русский](README.ru.md)
-
 # HF Test RF Signal Generator
 
 A web interface for transmitting a library of test IQ signals in the HF band
@@ -10,10 +8,19 @@ provides a spectrum preview without transmitting, a technical data sheet for
 every signal (modulation, baud rate, FEC, etc.), and signal exchange between
 program instances via bundle files with import straight from the server's disk.
 
-The library currently contains **91 signals**, from the classics (STANAG-4285,
-PACTOR, SITOR) to about fifty modes from the WaveCom archive (MFSK/PSK
-families, military ARQ, fax, Hellschreiber). The full list is in the
-[appendix](#appendix-full-signal-list) at the end of this document.
+**The repository contains the tool only, not the signals.** You build your
+own library from recordings you have: any mono WAV recording of an HF signal
+as it sounds after SSB demodulation (modem tones at audio frequencies) can be
+turned into a ready-to-transmit IQ file with the included converter
+(see [WAV to IQ conversion](#2-wav-to-iq-conversion-wav_to_iq_librarypy)),
+and clean carriers/tones for calibration can be generated with no recordings
+at all (see [Test tone generation](#3-test-tone-generation-generate_sinepy)).
+
+The author's own private library has 91 signals, from the classics
+(STANAG-4285, PACTOR, SITOR) to about fifty modes (MFSK/PSK families,
+military ARQ, fax, Hellschreiber). It is not distributed; its list is shown
+in the [appendix](#appendix-example-signal-list) as an example of what a
+library and its technical data sheets can look like.
 
 The look is a black-and-green terminal theme.
 
@@ -45,7 +52,7 @@ The look is a black-and-green terminal theme.
 10. [Porting to Raspberry Pi 4 (8 GB) with a touchscreen](#porting-to-raspberry-pi-4-8-gb-with-a-touchscreen)
 11. [Debugging history and known pitfalls](#debugging-history-and-known-pitfalls)
 12. [TX level safety](#tx-level-safety)
-13. [Appendix: full signal list](#appendix-full-signal-list)
+13. [Appendix: example signal list](#appendix-example-signal-list)
 
 ---
 
@@ -709,6 +716,12 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 Open `http://localhost:8000`.
 
+The library starts out without signals (none are shipped with the
+repository). Add your own with `tools/wav_to_iq_library.py` and/or
+`tools/generate_sine.py` — see [Adding and annotating
+signals](#adding-and-annotating-signals). Signals received as `.tar` bundles
+from other users can be imported through the interface.
+
 Optionally — restrict where bundles can be imported from (see section 9):
 ```bash
 set IMPORT_ALLOWED_ROOTS=D:\usb-signals
@@ -935,11 +948,15 @@ permitted power on your frequency.
 
 ---
 
-## Appendix: full signal list
+## Appendix: example signal list
 
-91 signals at the time of writing. A dash (`—`) means the field is not filled
-in (no reliable source, see section 8). Frequencies are the recommended
-defaults and can always be overridden in the interface before starting.
+This is the list of the author's private library (91 signals at the time of
+writing). **These signals are not included in the repository** — the table
+is only an example of what a library and its technical data sheets can look
+like, and a checklist of modes you may want to build your own recordings for.
+A dash (`—`) means the field is not filled in (no reliable source, see
+section 8). Frequencies are the recommended defaults and can always be
+overridden in the interface before starting.
 
 | ID | Name | Frequency, MHz | Modulation | Tones | Baud | Shift, Hz | Bandwidth, Hz | Bitrate, bit/s | FEC |
 |---|---|---|---|---|---|---|---|---|---|
