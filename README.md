@@ -1,79 +1,84 @@
-# Генератор тестовых РЧ сигналов (КВ)
+[English](README.md) | [Русский](README.ru.md)
 
-Веб-интерфейс для трансляции библиотеки тестовых IQ-сигналов в КВ-диапазон
-через **HackRF One**. Выбираешь сигнал из выпадающего списка → задаёшь
-частоту/усиление → жмёшь «Старт» → сигнал идёт в эфир, а в браузере в
-реальном времени рисуется его спектр, водопад и прогресс проигрывания.
-Есть предпросмотр спектра без передачи в эфир, технический паспорт каждого
-сигнала (модуляция, скорость, FEC и т.п.) и обмен сигналами между
-экземплярами программы через файлы-бандлы с импортом прямо с диска сервера.
+# HF Test RF Signal Generator
 
-Библиотека на данный момент — **91 сигнал**, от классики (STANAG-4285,
-PACTOR, SITOR) до полусотни режимов из архива WaveCom (MFSK/PSK-семейства,
-военные ARQ, факс, Hellschreiber). Полный список — в
-[приложении](#приложение-полный-список-сигналов) в конце документа.
+A web interface for transmitting a library of test IQ signals in the HF band
+through a **HackRF One**. Pick a signal from the drop-down list → set the
+frequency/gain → press "Start" → the signal goes on air, while the browser
+draws its spectrum, waterfall and playback progress in real time. It also
+provides a spectrum preview without transmitting, a technical data sheet for
+every signal (modulation, baud rate, FEC, etc.), and signal exchange between
+program instances via bundle files with import straight from the server's disk.
 
-Оформление — чёрно-зелёная терминальная тема.
+The library currently contains **91 signals**, from the classics (STANAG-4285,
+PACTOR, SITOR) to about fifty modes from the WaveCom archive (MFSK/PSK
+families, military ARQ, fax, Hellschreiber). The full list is in the
+[appendix](#appendix-full-signal-list) at the end of this document.
 
----
+The look is a black-and-green terminal theme.
 
-## Содержание
-
-1. [Структура проекта](#структура-проекта)
-2. [Общая архитектура и поток данных](#общая-архитектура-и-поток-данных)
-3. [Как это устроено — по шагам](#как-это-устроено--по-шагам)
-   - [Формат хранения сигналов](#1-формат-хранения-сигналов)
-   - [Конвертация WAV → IQ](#2-конвертация-wav--iq-wav_to_iq_librarypy)
-   - [Генерация тестового тона](#3-генерация-тестового-тона-generate_sinepy)
-   - [Кэш спектра](#4-кэш-спектра-spectrum_cachepy)
-   - [Передача в эфир](#5-передача-в-эфир-hackrf_txpy)
-   - [Живой спектр и предпросмотр](#6-живой-спектр-и-предпросмотр)
-   - [Прогресс воспроизведения](#7-прогресс-воспроизведения)
-   - [Технический паспорт сигнала](#8-технический-паспорт-сигнала-signal_specpy)
-   - [Экспорт и импорт бандлов](#9-экспорт-и-импорт-бандлов)
-4. [Схема library.json](#схема-libraryjson)
-5. [API бэкенда](#api-бэкенда)
-6. [Установка и запуск](#установка-и-запуск)
-7. [Добавление и аннотирование сигналов](#добавление-и-аннотирование-сигналов)
-8. [Обмен сигналами между машинами](#обмен-сигналами-между-машинами)
-9. [Веб-интерфейс](#веб-интерфейс)
-10. [Перенос на Raspberry Pi](#перенос-на-raspberry-pi-4-8-гб-с-тачскрином)
-11. [История отладки и известные грабли](#история-отладки-и-известные-грабли)
-12. [Безопасность по уровню TX](#безопасность-по-уровню-tx)
-13. [Приложение: полный список сигналов](#приложение-полный-список-сигналов)
+> **Note:** the web interface is in Russian. UI element names are given below
+> in English, with the original Russian label in parentheses where useful.
 
 ---
 
-## Структура проекта
+## Table of contents
+
+1. [Project structure](#project-structure)
+2. [Architecture and data flow](#architecture-and-data-flow)
+3. [How it works, step by step](#how-it-works-step-by-step)
+   - [Signal storage format](#1-signal-storage-format)
+   - [WAV to IQ conversion](#2-wav-to-iq-conversion-wav_to_iq_librarypy)
+   - [Test tone generation](#3-test-tone-generation-generate_sinepy)
+   - [Spectrum cache](#4-spectrum-cache-spectrum_cachepy)
+   - [Transmission](#5-transmission-hackrf_txpy)
+   - [Live spectrum and preview](#6-live-spectrum-and-preview)
+   - [Playback progress](#7-playback-progress)
+   - [Signal technical spec](#8-signal-technical-spec-signal_specpy)
+   - [Bundle export and import](#9-bundle-export-and-import)
+4. [library.json schema](#libraryjson-schema)
+5. [Backend API](#backend-api)
+6. [Installation and running](#installation-and-running)
+7. [Adding and annotating signals](#adding-and-annotating-signals)
+8. [Exchanging signals between machines](#exchanging-signals-between-machines)
+9. [Web interface](#web-interface)
+10. [Porting to Raspberry Pi 4 (8 GB) with a touchscreen](#porting-to-raspberry-pi-4-8-gb-with-a-touchscreen)
+11. [Debugging history and known pitfalls](#debugging-history-and-known-pitfalls)
+12. [TX level safety](#tx-level-safety)
+13. [Appendix: full signal list](#appendix-full-signal-list)
+
+---
+
+## Project structure
 
 ```
 iq_broadcast/
   backend/
-    main.py             # FastAPI: все эндпоинты, состояние трансляции/импорта, потоки
-    hackrf_tx.py         # обёртка над hackrf_transfer (запуск/остановка/мониторинг процесса)
-    spectrum_cache.py    # расчёт БПФ + кэширование, используется и live, и офлайн
-    library_utils.py     # чтение/запись library.json (общее для конвертеров и main.py)
-    signal_spec.py        # описание "паспортных" технических полей сигнала
+    main.py              # FastAPI: all endpoints, broadcast/import state, threads
+    hackrf_tx.py         # wrapper around hackrf_transfer (start/stop/monitor the process)
+    spectrum_cache.py    # FFT computation + caching, used by both live and offline paths
+    library_utils.py     # reading/writing library.json (shared by converters and main.py)
+    signal_spec.py       # description of the "data sheet" technical fields of a signal
   tools/
-    wav_to_iq_library.py # конвертер: WAV -> .cs8 + запись в библиотеку + кэш спектра
-    generate_sine.py      # генератор чистого тона -> .cs8 + запись в библиотеку + кэш
-    export_bundle.py      # упаковка сигналов библиотеки в .tar для передачи другому пользователю
-    annotate_signal.py    # правка технического паспорта существующего сигнала без переконвертации
+    wav_to_iq_library.py # converter: WAV -> .cs8 + library entry + spectrum cache
+    generate_sine.py     # pure-tone generator -> .cs8 + library entry + cache
+    export_bundle.py     # packs library signals into a .tar for handing to another user
+    annotate_signal.py   # edits the technical data sheet of an existing signal without reconverting
   library/
-    library.json          # метаданные всех сигналов
-    <id>.cs8               # сами IQ-файлы (int8, готовые для HackRF)
+    library.json         # metadata of all signals
+    <id>.cs8             # the IQ files themselves (int8, ready for HackRF)
     spectrum_cache/
-      <id>.npz              # предпосчитанный спектр (кадры БПФ), см. ниже
-    _import_tmp/            # временная папка для распаковки бандлов (см. ниже, почему тут)
+      <id>.npz           # precomputed spectrum (FFT frames), see below
+    _import_tmp/         # temporary folder for unpacking bundles (see below for why it is here)
   frontend/
-    index.html             # весь веб-интерфейс: разметка + стили + JS одним файлом
+    index.html           # the whole web interface: markup + styles + JS in one file
   requirements.txt
   README.md
 ```
 
 ---
 
-## Общая архитектура и поток данных
+## Architecture and data flow
 
 ```
                          ┌─────────────────────────┐
@@ -81,722 +86,735 @@ iq_broadcast/
                          │ library/<id>.cs8        │
                          │ library/spectrum_cache/ │
                          └───────────┬─────────────┘
-                                     │ читает
+                                     │ reads
                     ┌────────────────┴─────────────────┐
                     │                                  │
           ┌─────────▼─────────┐              ┌─────────▼─────────┐
           │  backend/main.py  │              │  tools/*.py       │
-          │  (FastAPI-сервер) │              │ (конвертеры,      │
-          │                   │              │  аннотирование,   │
-          │                   │              │  экспорт бандлов) │
+          │  (FastAPI server) │              │ (converters,      │
+          │                   │              │  annotation,      │
+          │                   │              │  bundle export)   │
           └──┬──────────────┬─┘              └───────────────────┘
              │              │
     POST/GET │              │ WebSocket
              │              │
      ┌───────▼──────┐  ┌────▼─────────────────┐
      │ hackrf_tx.py │  │ spectrum_cache.py    │
-     │ (subprocess  │  │ (расчёт/чтение       │
-     │  hackrf_     │  │  кадров БПФ)         │
+     │ (subprocess  │  │ (computing/reading   │
+     │  hackrf_     │  │  FFT frames)         │
      │  transfer,   │  └───────────┬──────────┘
-     │  мониторинг  │              │
-     │  stderr)     │              │
+     │  stderr      │              │
+     │  monitoring) │              │
      └───────┬──────┘              │
              │                     │
      ┌───────▼───────┐      ┌───────▼────────┐
      │  HackRF One   │      │  frontend/     │
-     │ (реальный TX) │      │  index.html    │
-     └───────────────┘      │  (спектр,      │
-                            │   водопад,     │
-                            │   прогресс,    │
-                            │   управление)  │
+     │ (real TX)     │      │  index.html    │
+     └───────────────┘      │  (spectrum,    │
+                            │   waterfall,   │
+                            │   progress,    │
+                            │   controls)    │
                             └────────────────┘
 ```
 
-Два принципиально независимых потока данных:
+There are two fundamentally independent data paths:
 
-- **Тракт передачи**: `main.py` запускает `hackrf_transfer` (через
-  `hackrf_tx.py`), который читает `.cs8`-файл с диска и льёт его в HackRF.
-  Никакого Python на пути самих сэмплов нет — это оказалось критично для
-  стабильности (см. [историю отладки](#история-отладки-и-известные-грабли)).
-  Отдельно — `hackrf_tx.py` следит за stderr этого процесса, чтобы отличить
-  реальную работу от "жив, но завис".
-- **Тракт визуализации**: отдельный поток читает тот же `.cs8` (либо готовый
-  кэш) и считает/шлёт спектр по WebSocket. Он никак не связан с трактом
-  передачи — падение одного не затрагивает другой, и можно даже смотреть
-  предпросмотр совсем другого сигнала во время реальной трансляции.
+- **Transmit path**: `main.py` launches `hackrf_transfer` (via
+  `hackrf_tx.py`), which reads the `.cs8` file from disk and pushes it into
+  the HackRF. There is no Python on the path of the samples themselves — this
+  turned out to be critical for stability (see the
+  [debugging history](#debugging-history-and-known-pitfalls)). Separately,
+  `hackrf_tx.py` watches the stderr of that process to tell real work apart
+  from "alive but hung".
+- **Visualization path**: a separate thread reads the same `.cs8` (or the
+  ready-made cache) and computes/sends the spectrum over WebSocket. It is not
+  tied to the transmit path in any way — a failure of one does not affect the
+  other, and you can even preview a completely different signal during a real
+  transmission.
 
 ---
 
-## Как это устроено — по шагам
+## How it works, step by step
 
-### 1. Формат хранения сигналов
+### 1. Signal storage format
 
-Каждый сигнал в библиотеке — это готовый **int8 IQ-файл** (`.cs8`,
-интерливинг I,Q по одному байту на компоненту, диапазон -128..127) уже на
-той частоте дискретизации, на которой его будет читать `hackrf_transfer`
-(по умолчанию 2 МГц). Никакого промежуточного "мастер-формата" и рендера
-при воспроизведении не делается — конвертация в формат HackRF происходит
-один раз, при добавлении сигнала в библиотеку, инструментами из `tools/`.
+Each signal in the library is a ready-made **int8 IQ file** (`.cs8`,
+interleaved I,Q, one byte per component, range -128..127) already at the
+sample rate `hackrf_transfer` will read it at (2 MHz by default). There is no
+intermediate "master format" and no rendering at playback time — conversion
+to the HackRF format happens once, when a signal is added to the library, by
+the tools in `tools/`.
 
-Это было не всегда так — изначально в библиотеке хранился компактный
-"мастер"-файл на низкой частоте (200 кГц, int16), а передискретизация под
-HackRF происходила на лету при каждом запуске воспроизведения. От этой
-схемы отказались: рендер занимал заметное время (около минуты на
-3-минутный сигнал) прямо перед стартом передачи. Раз конвертация всё равно
-нужна один раз — логичнее сразу писать целевой формат и не тратить время
-при каждом `play`. Расплата — файлы в библиотеке крупнее (могут быть
-сотни МБ на длинную запись), но это одноразовая плата при добавлении
-сигнала, а не при каждом воспроизведении.
+It was not always this way — originally the library stored a compact
+"master" file at a low rate (200 kHz, int16), and resampling for the HackRF
+happened on the fly on every playback start. That scheme was abandoned:
+rendering took a noticeable amount of time (about a minute for a 3-minute
+signal) right before the transmission started. Since conversion is needed
+once anyway, it is more sensible to write the target format right away and
+not spend time on every `play`. The price is larger library files (hundreds
+of MB for a long recording), but it is a one-off cost when adding a signal,
+not on every playback.
 
-### 2. Конвертация WAV → IQ (`wav_to_iq_library.py`)
+### 2. WAV to IQ conversion (`wav_to_iq_library.py`)
 
-Берёт моно WAV-запись HF-сигнала таким, каким он звучит в наушниках после
-демодуляции в SSB (тона модема на аудио-частотах, обычно 0.3–3 кГц —
-подходит для STANAG-4285, ALE, PACTOR, RTTY, PSK31 и т.п.), и превращает
-её в комплексный IQ-сигнал, готовый для передачи через SDR. Шаги конвейера:
+Takes a mono WAV recording of an HF signal as it sounds in headphones after
+SSB demodulation (modem tones at audio frequencies, usually 0.3–3 kHz — fits
+STANAG-4285, ALE, PACTOR, RTTY, PSK31, etc.) and turns it into a complex IQ
+signal ready for transmission through an SDR. Pipeline steps:
 
-1. **Чтение WAV**, приведение к моно (берётся первый канал, если их
-   несколько) и нормализация амплитуды в диапазон [-1, 1].
-2. **ФНЧ (Баттерворт, 6 порядка)** перед преобразованием Гильберта —
-   срез по умолчанию 3500 Гц. Убирает шум у границы Найквиста исходной
-   записи: без этого шага при построении аналитического сигнала (следующий
-   шаг) такой шум просачивается зеркальным артефактом на отрицательные
-   частоты из-за эффекта Гиббса на конечном по длине преобразовании.
-3. **Преобразование Гильберта** — из вещественного аудио-сигнала строит
-   аналитический (комплексный) сигнал. Это ключевой шаг: вещественная
-   запись сама по себе не несёт информации о том, по какую сторону от
-   несущей должен оказаться сигнал при передаче; преобразование Гильберта
-   восстанавливает эту информацию, воспроизводя ту же боковую полосу
-   (USB/LSB), в которой сигнал изначально принимался.
-4. **Передискретизация** с исходной частоты WAV (обычно 8–48 кГц) на
-   целевую частоту библиотеки (по умолчанию 2 МГц) — линейная интерполяция
-   блоками, без построения полноценного полифазного FIR-фильтра (при таком
-   огромном коэффициенте передискретизации, в сотни раз, полноценный FIR
-   создал бы неприемлемый всплеск потребления памяти).
-5. **ФНЧ ПОСЛЕ передискретизации** (Баттерворт 8 порядка, через SOS —
-   second-order sections, а не обычное представление `(b, a)`: при таком
-   высоком порядке и низкой нормированной частоте среза `(b, a)` численно
-   неустойчиво и даёт `NaN` на выходе). Обязателен: простая линейная
-   интерполяция при коэффициенте передискретизации в сотни раз создаёт
-   паразитные образы (imaging) на частотах вида `-(fs_исходная -
-   f_сигнала)` — проверено эмпирически на нескольких сигналах, предсказанная
-   по этой формуле частота образа совпадала с наблюдаемой с точностью до
-   сотен герц. Без этого шага артефакт был на 20-25 дБ ниже пика — достаточно
-   заметно на спектре, и реально уходил в эфир при передаче. Фильтр
-   реализован с сохранением состояния (`zi`) между блоками, чтобы не было
-   щелчков на границах.
-6. **Масштабирование и запись** — амплитуда домножается на коэффициент
-   `--gain` (0..1, по умолчанию 0.7, чтобы был запас от клиппинга при
-   переводе в 8 бит) и пишется как interleaved int8 I/Q.
-7. **Регистрация в библиотеке** — запись метаданных в `library.json`
-   (через `library_utils.register_signal`, заменяет запись с тем же `id`,
-   если она уже была).
-8. **Построение кэша спектра** — автоматически вызывается
-   `spectrum_cache.build_cache_for_signal()` (см. ниже), отдельного шага
-   не требуется.
+1. **Read the WAV**, convert to mono (the first channel is used if there are
+   several) and normalize the amplitude to the range [-1, 1].
+2. **Low-pass filter (Butterworth, order 6)** before the Hilbert transform —
+   default cutoff 3500 Hz. Removes noise near the Nyquist frequency of the
+   source recording: without this step, when the analytic signal is built
+   (next step), such noise leaks as a mirror artifact onto negative
+   frequencies because of the Gibbs effect on a finite-length transform.
+3. **Hilbert transform** — builds the analytic (complex) signal from the real
+   audio signal. This is the key step: a real recording by itself carries no
+   information about which side of the carrier the signal should end up on
+   when transmitted; the Hilbert transform restores it, reproducing the same
+   sideband (USB/LSB) the signal was originally received in.
+4. **Resampling** from the WAV's original rate (usually 8–48 kHz) to the
+   library's target rate (2 MHz by default) — block-wise linear
+   interpolation, without building a full polyphase FIR filter (with such a
+   huge resampling ratio, hundreds of times, a full FIR would cause an
+   unacceptable memory spike).
+5. **Low-pass filter AFTER resampling** (Butterworth, order 8, via SOS —
+   second-order sections, not the ordinary `(b, a)` representation: at such
+   a high order and low normalized cutoff frequency `(b, a)` is numerically
+   unstable and yields `NaN` at the output). Mandatory: plain linear
+   interpolation at a resampling ratio of hundreds creates spurious images
+   at frequencies of the form `-(fs_source - f_signal)` — verified
+   empirically on several signals; the image frequency predicted by this
+   formula matched the observed one to within hundreds of hertz. Without this
+   step the artifact was 20–25 dB below the peak — quite visible on the
+   spectrum, and it really went on air during transmission. The filter is
+   implemented with state (`zi`) carried across blocks, so there are no
+   clicks at block boundaries.
+6. **Scaling and writing** — the amplitude is multiplied by the `--gain`
+   factor (0..1, default 0.7, to leave headroom against clipping when
+   converting to 8 bits) and written as interleaved int8 I/Q.
+7. **Library registration** — metadata is written to `library.json`
+   (via `library_utils.register_signal`, which replaces an entry with the
+   same `id` if one already exists).
+8. **Spectrum cache build** — `spectrum_cache.build_cache_for_signal()` is
+   called automatically (see below), no separate step is needed.
 
-Полный список параметров командной строки:
+Full list of command-line parameters:
 
-| Флаг | По умолчанию | Смысл |
+| Flag | Default | Meaning |
 |---|---|---|
-| `input_wav` | — | путь к исходному WAV (обязательный) |
-| `--id` | — | уникальный ID в библиотеке (обязательный) |
-| `--name` | — | отображаемое имя (обязательный) |
-| `--freq` | — | рекомендуемая частота передачи, Гц (обязательный) |
-| `--description` | `""` | описание сигнала |
-| `--library` | `../library` | путь к папке библиотеки |
-| `--sample-rate` | `2000000` | частота дискретизации итогового файла, Гц |
-| `--gain` | `0.7` | масштаб амплитуды 0..1 |
-| `--lowpass` | `3500.0` | срез ФНЧ перед Гильбертом, Гц (`0` — отключить) |
-| `--tx-vga-gain` | `20` | TX VGA gain HackRF по умолчанию для этого сигнала, 0–47 дБ |
-| `--amp-enable` | выкл | включить встроенный усилитель HackRF (+14 дБ) по умолчанию |
-| `--sideband` | `usb` | боковая полоса исходной записи (`usb`/`lsb`) — информационное поле |
-| `--spectrum-freq-min-khz` | `-5.0` | нижняя граница окна спектра в интерфейсе, кГц |
-| `--spectrum-freq-max-khz` | `5.0` | верхняя граница окна спектра, кГц |
-| `--spectrum-db-min` | `-100.0` | нижняя граница шкалы амплитуды на графике, дБ |
-| `--spectrum-db-max` | `0.0` | верхняя граница шкалы амплитуды, дБ |
-| `--loop` | вкл | зациклить воспроизведение по умолчанию для этого сигнала |
-| `--modulation`, `--tone-count`, `--baud-rate`, `--shift-hz`, `--bandwidth-hz`, `--bitrate-bps`, `--encoding`, `--fec`, `--interleaving` | все `None` | технический паспорт сигнала, см. [раздел 8](#8-технический-паспорт-сигнала-signal_specpy) |
+| `input_wav` | — | path to the source WAV (required) |
+| `--id` | — | unique library ID (required) |
+| `--name` | — | display name (required) |
+| `--freq` | — | recommended transmit frequency, Hz (required) |
+| `--description` | `""` | signal description |
+| `--library` | `../library` | path to the library folder |
+| `--sample-rate` | `2000000` | sample rate of the output file, Hz |
+| `--gain` | `0.7` | amplitude scale 0..1 |
+| `--lowpass` | `3500.0` | cutoff of the pre-Hilbert low-pass filter, Hz (`0` — disable) |
+| `--tx-vga-gain` | `20` | default HackRF TX VGA gain for this signal, 0–47 dB |
+| `--amp-enable` | off | enable the HackRF built-in amplifier (+14 dB) by default |
+| `--sideband` | `usb` | sideband of the source recording (`usb`/`lsb`) — informational field |
+| `--spectrum-freq-min-khz` | `-5.0` | lower edge of the spectrum window in the UI, kHz |
+| `--spectrum-freq-max-khz` | `5.0` | upper edge of the spectrum window, kHz |
+| `--spectrum-db-min` | `-100.0` | lower edge of the amplitude scale on the plot, dB |
+| `--spectrum-db-max` | `0.0` | upper edge of the amplitude scale, dB |
+| `--loop` | on | loop playback by default for this signal |
+| `--modulation`, `--tone-count`, `--baud-rate`, `--shift-hz`, `--bandwidth-hz`, `--bitrate-bps`, `--encoding`, `--fec`, `--interleaving` | all `None` | technical data sheet of the signal, see [section 8](#8-signal-technical-spec-signal_specpy) |
 
-Пример:
+Example:
 ```bash
 cd tools
 python3 wav_to_iq_library.py path/to/signal.wav \
     --id my-signal \
-    --name "Название сигнала" \
+    --name "Signal name" \
     --freq 7000000 \
     --description "..." \
     --modulation "PSK" --baud-rate 100 \
     --library ../library
 ```
 
-### 3. Генерация тестового тона (`generate_sine.py`)
+### 3. Test tone generation (`generate_sine.py`)
 
-Отдельный, гораздо более простой путь для чистых калибровочных сигналов —
-без WAV на входе, без ФНЧ и Гильберта. Генерирует комплексную экспоненту
-напрямую:
+A separate, much simpler path for pure calibration signals — no WAV input,
+no low-pass filter or Hilbert transform. It generates a complex exponential
+directly:
 
-- При `--offset-khz 0` — чистая несущая: постоянный вектор `I = amplitude,
-  Q = 0` на всю длительность. Шва при зацикливании быть не может в принципе
-  (сигнал константен).
-- При ненулевом смещении — `I(t) + jQ(t) = amplitude · e^(j·2π·offset·t)`.
-  Длительность автоматически подгоняется под **целое число периодов** тона,
-  чтобы при зацикливании файла (`hackrf_transfer -R`) не было щелчка на
-  стыке (последний отсчёт файла плавно продолжается первым).
+- With `--offset-khz 0` — a pure carrier: a constant vector `I = amplitude,
+  Q = 0` for the whole duration. There cannot be a seam when looping (the
+  signal is constant).
+- With a non-zero offset — `I(t) + jQ(t) = amplitude · e^(j·2π·offset·t)`.
+  The duration is automatically adjusted to an **integer number of periods**
+  of the tone, so that when the file is looped (`hackrf_transfer -R`) there
+  is no click at the joint (the last sample of the file smoothly continues
+  into the first).
 
-Смещение от центра по умолчанию **+1 кГц, не 0** — у передатчиков прямого
-преобразования (в том числе HackRF) на самой несущей нередко виден
-паразитный DC-спайк от утечки гетеродина; тон в стороне от центра с ним не
-спутать на анализаторе спектра.
+The default offset from center is **+1 kHz, not 0** — direct-conversion
+transmitters (HackRF included) often show a spurious DC spike from LO
+leakage right at the carrier; a tone off to the side cannot be confused with
+it on a spectrum analyzer.
 
-Технический паспорт заполняется разумными значениями по умолчанию, если не
-переопределён явно: `modulation` = "Несущая без модуляции (CW)" при нулевом
-смещении, иначе "Немодулированный тон"; `tone_count` = 1; `fec` и
-`interleaving` = "нет".
+The technical data sheet is filled with sensible defaults unless overridden
+explicitly: `modulation` = "Unmodulated carrier (CW)" at zero offset,
+otherwise "Unmodulated tone"; `tone_count` = 1; `fec` and `interleaving` =
+"none".
 
-Параметры командной строки:
+Command-line parameters:
 
-| Флаг | По умолчанию | Смысл |
+| Flag | Default | Meaning |
 |---|---|---|
-| `--id` | — | уникальный ID (обязательный) |
-| `--name` | `"Тестовый тон"` | отображаемое имя |
-| `--freq` | — | центральная частота передачи, Гц (обязательный) |
-| `--offset-khz` | `1.0` | смещение тона от центра, кГц (`0` = чистая несущая) |
-| `--amplitude` | `0.8` | амплитуда 0..1 |
-| `--duration` | `2.0` | ориентировочная длительность, с (реальная будет скорректирована под целое число периодов) |
-| `--sample-rate` | `2000000` | частота дискретизации, Гц |
-| `--library` | `../library` | путь к библиотеке |
-| `--tx-vga-gain` | `20` | TX VGA gain по умолчанию |
-| `--amp-enable` | выкл | усилитель HackRF по умолчанию |
-| `--description` | автогенерируется | описание |
-| `--spectrum-freq-min-khz` / `--spectrum-freq-max-khz` | подбирается автоматически (с отступом вокруг тона) | окно спектра |
-| `--spectrum-db-min` / `--spectrum-db-max` | `-100.0` / `0.0` | шкала амплитуды |
-| технический паспорт (см. раздел 8) | см. выше | как и у `wav_to_iq_library.py` |
+| `--id` | — | unique ID (required) |
+| `--name` | `"Test tone"` | display name |
+| `--freq` | — | center transmit frequency, Hz (required) |
+| `--offset-khz` | `1.0` | tone offset from center, kHz (`0` = pure carrier) |
+| `--amplitude` | `0.8` | amplitude 0..1 |
+| `--duration` | `2.0` | approximate duration, s (the actual one is adjusted to an integer number of periods) |
+| `--sample-rate` | `2000000` | sample rate, Hz |
+| `--library` | `../library` | path to the library |
+| `--tx-vga-gain` | `20` | default TX VGA gain |
+| `--amp-enable` | off | HackRF amplifier by default |
+| `--description` | auto-generated | description |
+| `--spectrum-freq-min-khz` / `--spectrum-freq-max-khz` | chosen automatically (with margin around the tone) | spectrum window |
+| `--spectrum-db-min` / `--spectrum-db-max` | `-100.0` / `0.0` | amplitude scale |
+| technical data sheet (see section 8) | see above | same as `wav_to_iq_library.py` |
 
-Пример:
+Example:
 ```bash
-python3 generate_sine.py --id carrier-10mhz --name "Несущая 10 МГц" \
+python3 generate_sine.py --id carrier-10mhz --name "10 MHz carrier" \
     --freq 10000000 --offset-khz 0 --library ../library
 ```
 
-### 4. Кэш спектра (`spectrum_cache.py`)
+### 4. Spectrum cache (`spectrum_cache.py`)
 
-Расчёт БПФ по всему файлу сигнала — не самая дешёвая операция, а при
-зацикленном воспроизведении она бы повторялась заново на каждый круг без
-всякой необходимости (сигнал в файле один и тот же). Поэтому спектр
-считается **один раз, при добавлении сигнала в библиотеку**, и кэшируется:
+Computing an FFT over the whole signal file is not the cheapest operation,
+and with looped playback it would be repeated on every lap for no reason at
+all (the signal in the file is always the same). So the spectrum is computed
+**once, when the signal is added to the library**, and cached:
 
-- `iter_raw_frames(file)` — читает файл окнами по `CHUNK_SAMPLES = 65536`
-  отсчётов, на каждом окне считает БПФ с окном Блэкмана-Харриса
-  (низкие боковые лепестки) и отдаёт спектр в дБ. Последний неполный блок
-  в конце файла отбрасывается. Этот генератор — **общий код**, который
-  используют и построение кэша, и живой расчёт (если кэша нет) — поэтому
-  поведение между ними гарантированно не расходится.
-- `build_cache_for_signal(signal_meta, library_dir)` — прогоняет
-  `iter_raw_frames` по всему файлу, обрезает каждый кадр по частоте
-  (`spectrum_freq_min_khz`/`max_khz` из метаданных сигнала) и сохраняет всё
-  в `library/spectrum_cache/<id>.npz` (сжатый numpy-архив: массив частот,
-  матрица кадров `[число_кадров × число_точек]`, плюс метаданные для
-  проверки валидности).
-- `load_cache_if_valid(signal_meta, library_dir)` — при воспроизведении
-  проверяет, что кэш существует, не старше самого `.cs8` (по mtime) и
-  совпадает по `sample_rate`, размеру окна БПФ и границам обрезки с
-  текущими метаданными сигнала. При любом несовпадении — тихо возвращает
-  `None`, без исключений, и код-потребитель просто считает вживую.
+- `iter_raw_frames(file)` — reads the file in windows of `CHUNK_SAMPLES =
+  65536` samples, computes an FFT with a Blackman-Harris window (low
+  sidelobes) on each window and yields the spectrum in dB. The last
+  incomplete block at the end of the file is discarded. This generator is
+  **shared code** used both by the cache builder and by live computation (if
+  there is no cache) — so the behavior of the two is guaranteed not to
+  diverge.
+- `build_cache_for_signal(signal_meta, library_dir)` — runs `iter_raw_frames`
+  over the whole file, crops every frame by frequency
+  (`spectrum_freq_min_khz`/`max_khz` from the signal metadata) and saves
+  everything to `library/spectrum_cache/<id>.npz` (a compressed numpy
+  archive: frequency array, frame matrix `[n_frames × n_points]`, plus
+  metadata for validity checking).
+- `load_cache_if_valid(signal_meta, library_dir)` — on playback, checks that
+  the cache exists, is not older than the `.cs8` itself (by mtime) and
+  matches the signal's current `sample_rate`, FFT window size and crop
+  limits. On any mismatch it silently returns `None`, without exceptions,
+  and the consumer code simply computes live.
 
-Кэш **не кладётся ни в бандлы при экспорте, ни куда-либо ещё** — он
-регенерируется на месте (в том числе автоматически при импорте бандла),
-чтобы не завязываться на версию `spectrum_cache.py` на другой машине.
+The cache is **not put into bundles on export, nor anywhere else** — it is
+regenerated in place (including automatically when importing a bundle), so
+as not to depend on the version of `spectrum_cache.py` on another machine.
 
-Усреднение (сглаживание спектра между кадрами, экспоненциальное,
-`AVG_ALPHA = 0.25`) в кэше **не хранится** — кэшируются сырые кадры,
-усреднение делается на лету при проигрывании (в `main.py`). Это сохраняет
-одинаковое визуальное поведение независимо от того, кэш используется или
-живой расчёт, включая плавный переход на стыке зацикливания.
+Averaging (smoothing the spectrum between frames, exponential, `AVG_ALPHA =
+0.25`) is **not stored** in the cache — raw frames are cached, and averaging
+is done on the fly during playback (in `main.py`). This keeps the visual
+behavior identical whether the cache or live computation is used, including
+the smooth transition at the loop seam.
 
-Можно пересчитать кэш вручную, без переконвертации самого сигнала
-(например, если поменяли `CHUNK_SAMPLES` в коде, или поменяли
-`spectrum_freq_min/max_khz` через `annotate_signal.py` — см. раздел 8):
+The cache can be rebuilt manually, without reconverting the signal itself
+(for example, if `CHUNK_SAMPLES` was changed in the code, or
+`spectrum_freq_min/max_khz` was changed via `annotate_signal.py` — see
+section 8):
 ```bash
 cd backend
-python3 spectrum_cache.py                # пересчитать для ВСЕХ сигналов библиотеки
-python3 spectrum_cache.py stanag-4285    # только для одного
+python3 spectrum_cache.py                # rebuild for ALL library signals
+python3 spectrum_cache.py stanag-4285    # only for one
 ```
 
-Размер кэша по сравнению с самим IQ-файлом пренебрежимо мал: для
-STANAG-4285 (172 сек, 2 МГц) — кэш **4.15 МБ** против **688 МБ** самого
-`.cs8`.
+The cache size is negligible compared to the IQ file itself: for STANAG-4285
+(172 s, 2 MHz) the cache is **4.15 MB** against **688 MB** for the `.cs8`.
 
-### 5. Передача в эфир (`hackrf_tx.py`)
+### 5. Transmission (`hackrf_tx.py`)
 
-`HackRFTransmitter` — тонкая обёртка вокруг штатной утилиты
-`hackrf_transfer` (не питоновские биндинги libhackrf — сама утилита от
-разработчиков HackRF надёжнее держит реальное время передачи).
+`HackRFTransmitter` is a thin wrapper around the standard `hackrf_transfer`
+utility (not the Python bindings of libhackrf — the utility from the HackRF
+developers holds real-time transmission more reliably).
 
-**Запуск** (`start()`):
+**Start** (`start()`):
 ```
-hackrf_transfer -t <файл> -f <частота> -s <sample_rate> -x <tx_vga_gain> -a <0|1> [-R]
+hackrf_transfer -t <file> -f <frequency> -s <sample_rate> -x <tx_vga_gain> -a <0|1> [-R]
 ```
-- `-t <файл>` — читает готовый `.cs8` прямо с диска (не поток из Python —
-  см. [историю отладки](#история-отладки-и-известные-грабли), почему).
-- `-R` добавляется только если `loop=True` для этого запуска сигнала.
-  Без него `hackrf_transfer` доигрывает файл один раз и завершается сам,
-  кодом `0` — это распознаётся как штатное завершение, а не ошибка.
-- Перед стартом — `_preflight_check()`: пробует `hackrf_info` из того же
-  комплекта, что и `hackrf_transfer` (ищется рядом по пути), с несколькими
-  попытками — сразу после остановки предыдущей передачи устройство иногда
-  не успевает освободиться мгновенно.
-- На Windows процесс запускается в **своей отдельной, скрытой консоли**
-  (`CREATE_NEW_CONSOLE` + `STARTUPINFO` с `SW_HIDE`) — технически нужна для
-  корректной остановки (см. ниже), но визуально никакого окна не видно.
+- `-t <file>` — reads the ready `.cs8` straight from disk (not a stream from
+  Python — see the [debugging history](#debugging-history-and-known-pitfalls)
+  for why).
+- `-R` is added only if `loop=True` for this signal run. Without it,
+  `hackrf_transfer` plays the file once and exits by itself with code `0` —
+  this is recognized as a normal completion, not an error.
+- Before starting — `_preflight_check()`: tries `hackrf_info` from the same
+  package as `hackrf_transfer` (looked up alongside it on the path), with
+  several attempts — right after the previous transmission is stopped, the
+  device sometimes does not manage to release instantly.
+- On Windows the process is launched in **its own separate hidden console**
+  (`CREATE_NEW_CONSOLE` + `STARTUPINFO` with `SW_HIDE`) — technically needed
+  for correct stopping (see below), but no window is visible.
 
-**Остановка** (`close()` → `_graceful_stop()`): жёсткий `terminate()` не
-подходит — на Windows это `TerminateProcess()`, который не даёт
-`hackrf_transfer` шанса корректно освободить устройство
-(`hackrf_stop_tx() → hackrf_close() → hackrf_exit()`), из-за чего HackRF
-остаётся в состоянии "передача идёт" на уровне прошивки, и следующий
-`hackrf_open()` может провалиться, пока не переподключишь USB физически.
-Вместо этого:
-- на Linux/macOS — обычный `SIGINT` (то же самое, что нажать Ctrl+C);
-- на Windows — отправка `CTRL_C_EVENT` через **отдельный короткоживущий
-  вспомогательный процесс** (`python -c "..."`), который подключается к
-  консоли `hackrf_transfer` (`AttachConsole`), шлёт событие и сразу
-  завершается. Такая возня именно в отдельном процессе, а не в самом
-  сервере — принципиальна: `AttachConsole`/`FreeConsole` работают на
-  уровне всего процесса, а не потока, и если делать это прямо в потоке
-  внутри `uvicorn`, на короткое время **весь** сервер (включая обработку
-  HTTP-запросов в других потоках) остаётся без консоли и может подвиснуть.
-- если корректная остановка не сработала за отведённое время — тогда уже
-  `terminate()`/`kill()` как крайняя мера.
+**Stop** (`close()` → `_graceful_stop()`): a hard `terminate()` will not do —
+on Windows it is `TerminateProcess()`, which gives `hackrf_transfer` no
+chance to release the device properly (`hackrf_stop_tx() → hackrf_close() →
+hackrf_exit()`), so the HackRF stays in the "transmitting" state at the
+firmware level, and the next `hackrf_open()` may fail until the USB is
+physically reconnected. Instead:
+- on Linux/macOS — an ordinary `SIGINT` (same as pressing Ctrl+C);
+- on Windows — sending `CTRL_C_EVENT` through a **separate short-lived
+  helper process** (`python -c "..."`) that attaches to the console of
+  `hackrf_transfer` (`AttachConsole`), sends the event and exits at once.
+  Doing this in a separate process rather than in the server itself is
+  essential: `AttachConsole`/`FreeConsole` operate at the level of the whole
+  process, not a thread, and if done directly in a thread inside `uvicorn`,
+  **the entire** server (including HTTP request handling in other threads)
+  is left without a console for a short time and may hang.
+- if the graceful stop did not work within the allotted time — only then
+  `terminate()`/`kill()` as a last resort.
 
-**Мониторинг зависания** (`check_alive()`): процесс может быть формально
-жив (`proc.poll()` возвращает `None`), но при этом реально не передавать
-данные в USB — например, после нескольких успешных циклов вдруг замолчать
-без единой ошибки (наблюдалось на практике). `poll()` такое не ловит —
-нужен мониторинг **stderr** самого `hackrf_transfer` (именно stderr, не
-stdout — в stdout при `-t <файл>` не пишется вообще ничего, весь
-диагностический вывод, включая периодические строки статуса вида
-`X MiB / Y sec = ...`, идёт в stderr). Фоновый поток (`_read_stderr`)
-читает эти строки построчно и обновляет метку времени последней
-активности; если тишина в stderr длится дольше `STALL_TIMEOUT_SEC = 5.0`
-секунд — `check_alive()` бросает исключение с диагностикой (последние
-строки вывода), даже если сам процесс не вышел. При обычном завершении с
-кодом `0` (файл доигран без зацикливания) — это по-прежнему не ошибка.
+**Hang monitoring** (`check_alive()`): a process can be formally alive
+(`proc.poll()` returns `None`) but not actually be pushing data to USB — for
+example, after several successful cycles it suddenly goes silent without a
+single error (observed in practice). `poll()` does not catch that — the
+**stderr** of `hackrf_transfer` itself must be monitored (stderr, not stdout
+— with `-t <file>` nothing at all is written to stdout; all diagnostic
+output, including periodic status lines like `X MiB / Y sec = ...`, goes to
+stderr). A background thread (`_read_stderr`) reads these lines one by one
+and updates a last-activity timestamp; if silence in stderr lasts longer
+than `STALL_TIMEOUT_SEC = 5.0` seconds, `check_alive()` raises an exception
+with diagnostics (the last lines of output) even if the process itself has
+not exited. On normal completion with code `0` (file played to the end
+without looping) this is still not an error.
 
-**Отслеживание циклов** (`cycle_count`, `cycle_start_time`): та же
-строка `"Input file end reached. Rewind to beginning."` в stderr означает,
-что `hackrf_transfer` реально начал новый проход по файлу — не оценка, а
-факт. Используется для честного прогресс-бара, см.
-[раздел 7](#7-прогресс-воспроизведения).
+**Cycle tracking** (`cycle_count`, `cycle_start_time`): the line `"Input
+file end reached. Rewind to beginning."` in stderr means that
+`hackrf_transfer` really has started a new pass through the file — a fact,
+not an estimate. Used for an honest progress bar, see
+[section 7](#7-playback-progress).
 
-Если бинарник `hackrf_transfer` не найден в `PATH` (и не задан явно через
-переменную окружения `HACKRF_TRANSFER_BIN`) — класс переходит в режим
-**симуляции**. Сам этот режим устроен проще, чем можно подумать: `start()`
-в этом случае просто печатает сообщение в лог и сразу возвращается, не
-запуская никакого процесса и не делая вообще никаких пауз; `check_alive()`
-всегда возвращает `True`, тоже без единой задержки. Из-за этого
-"воспроизведение" в режиме симуляции не останавливается само — цикл
-опроса в `main.py` (`while ...: check_alive(); time.sleep(1.0)`) крутится,
-пока пользователь сам не нажмёт «Стоп», даже если у сигнала `loop=False`.
+If the `hackrf_transfer` binary is not found in `PATH` (and is not given
+explicitly via the `HACKRF_TRANSFER_BIN` environment variable), the class
+switches to **simulation** mode. This mode is simpler than it might seem:
+`start()` in this case just prints a message to the log and returns
+immediately, without launching any process and without any pauses at all;
+`check_alive()` always returns `True`, also without any delay. Because of
+this, "playback" in simulation mode does not stop by itself — the polling
+loop in `main.py` (`while ...: check_alive(); time.sleep(1.0)`) keeps
+spinning until the user presses "Stop" themselves, even if the signal has
+`loop=False`.
 
-Иллюзию "сигнал реально играет" в этом режиме создаёт **не** этот класс, а
-совершенно независимый поток спектра (`spectrum_worker`, раздел 6) — он
-читает настоящий `.cs8`-файл и выдерживает настоящий реальный темп
-воспроизведения через `stream_spectrum()`, вообще не зная о существовании
-`hackrf_tx.py` и не заглядывая в его состояние `simulate`. Именно поэтому
-спектр и водопад ведут себя одинаково правдоподобно что при реальной
-передаче, что без неё — а вот прогресс-бар в режиме симуляции работает
-только по грубой оценке времени (`cycle_start_time` внутри
-`HackRFTransmitter` в этом режиме никогда не выставляется, поскольку код,
-который его устанавливает, находится уже после точки `return` в `start()`).
+The illusion that "the signal is really playing" in this mode is created
+**not** by this class but by a completely independent spectrum thread
+(`spectrum_worker`, section 6) — it reads the real `.cs8` file and keeps
+real playback pace through `stream_spectrum()`, without knowing that
+`hackrf_tx.py` exists and without looking at its `simulate` state. That is
+exactly why the spectrum and waterfall behave equally plausibly with real
+transmission and without it — whereas the progress bar in simulation mode
+works only from a rough time estimate (`cycle_start_time` inside
+`HackRFTransmitter` is never set in this mode, because the code that sets it
+lies after the `return` point in `start()`).
 
-Удобно для разработки интерфейса на машине, где `hackrf_transfer` вообще
-не установлен.
+Convenient for interface development on a machine where `hackrf_transfer` is
+not installed at all.
 
-**Это не то же самое, что "HackRF физически не подключён".** Проверка —
-`shutil.which(HACKRF_TRANSFER_BIN) is None`, то есть смотрит только на
-наличие самого исполняемого файла, а не на физическое устройство. Если
-`hackrf_transfer` установлен (есть в `PATH`), но сам HackRF не подключён
-(или занят/не отвечает) — симуляция НЕ включается: `hackrf_transfer`
-реально запускается и падает с настоящей ошибкой отсутствия устройства,
-которая и попадёт в `/status.last_error`. Посмотреть спектр сигнала без
-подключённого устройства в этом случае — не через «Старт», а через кнопку
-**«Предпросмотр»**: она вообще не трогает `hackrf_transfer` (см. раздел 6),
-поэтому работает независимо от того, подключён ли HackRF.
+**This is not the same as "HackRF is physically not connected".** The check
+is `shutil.which(HACKRF_TRANSFER_BIN) is None`, i.e. it only looks at the
+presence of the executable itself, not the physical device. If
+`hackrf_transfer` is installed (present in `PATH`) but the HackRF itself is
+not connected (or is busy/not responding), simulation is NOT enabled:
+`hackrf_transfer` is really launched and fails with a genuine
+no-device error, which ends up in `/status.last_error`. To view a signal's
+spectrum without a connected device in that case, use the **"Preview"**
+button instead of "Start": it does not touch `hackrf_transfer` at all (see
+section 6), so it works regardless of whether the HackRF is connected.
 
-### 6. Живой спектр и предпросмотр
+### 6. Live spectrum and preview
 
-Обе задачи используют одну и ту же функцию `stream_spectrum(signal_meta,
-emit_fn, stop_event)` в `main.py` — она либо проигрывает кадры из кэша по
-кругу, либо (если кэша нет) считает вживую через `iter_raw_frames`, с тем
-же усреднением и тем же реальным темпом (пауза между кадрами рассчитывается
-исходя из фактического времени обработки, чтобы не накапливать дрейф).
-Единственное, что отличается между двумя режимами использования —
-куда деваются посчитанные кадры и что их останавливает:
+Both tasks use the same function `stream_spectrum(signal_meta, emit_fn,
+stop_event)` in `main.py` — it either plays back frames from the cache in a
+loop or (if there is no cache) computes live through `iter_raw_frames`, with
+the same averaging and the same real pace (the pause between frames is
+computed from the actual processing time so as not to accumulate drift). The
+only differences between the two modes of use are where the computed frames
+go and what stops them:
 
-- **Реальная трансляция** (`spectrum_worker`) — кадры уходят
-  `state.broadcast()`, то есть всем клиентам, подключённым к
-  `/ws/spectrum`; останавливается общим `state.stop_flag` (тем же, что
-  останавливает и саму передачу через HackRF).
-- **Предпросмотр** (`/ws/preview/{signal_id}`) — на каждое WebSocket-
-  подключение поднимается свой поток и свой `stop_event`, кадры уходят
-  напрямую в это одно соединение. Полностью независим от `PlaybackState` —
-  не трогает HackRF и не влияет на реальную трансляцию (если она в этот
-  момент идёт). Можно одновременно транслировать один сигнал и
-  просматривать спектр совершенно другого — они друг другу не мешают.
-  Поток завершается, когда клиент закрывает WebSocket (закрывает модальное
-  окно предпросмотра в интерфейсе).
+- **Real broadcast** (`spectrum_worker`) — frames go out via
+  `state.broadcast()`, i.e. to all clients connected to `/ws/spectrum`;
+  stopped by the common `state.stop_flag` (the same one that stops the
+  transmission itself through HackRF).
+- **Preview** (`/ws/preview/{signal_id}`) — each WebSocket connection gets
+  its own thread and its own `stop_event`, and frames go straight to that
+  one connection. Completely independent of `PlaybackState` — does not touch
+  the HackRF and does not affect the real broadcast (if one is running at
+  the moment). You can transmit one signal and view the spectrum of a
+  completely different one at the same time — they do not interfere. The
+  thread ends when the client closes the WebSocket (closes the preview modal
+  window in the interface).
 
-Перед отправкой спектр обрезается по частоте согласно
-`spectrum_freq_min_khz`/`max_khz` сигнала — на клиент уходит уже готовый,
-компактный набор точек (обычно 150–300 в зависимости от ширины окна),
-подписи осей на графике берутся из фактических границ этих данных.
+Before sending, the spectrum is cropped by frequency according to the
+signal's `spectrum_freq_min_khz`/`max_khz` — the client receives an already
+compact set of points (usually 150–300 depending on window width), and the
+axis labels on the plot are taken from the actual bounds of that data.
 
-### 7. Прогресс воспроизведения
+### 7. Playback progress
 
-Индикатор прогресса под статусом транслирует позицию внутри текущего
-прохода по файлу и номер цикла (если включено зацикливание). Источник
-данных — **оценка по времени с самокоррекцией**, а не точное чтение
-позиции файла (у нас нет доступа к внутреннему состоянию `hackrf_transfer`,
-он читает файл сам, в обход Python):
+The progress indicator under the status shows the position within the
+current pass through the file and the cycle number (if looping is on). The
+data source is a **time-based estimate with self-correction**, not an exact
+read of the file position (we have no access to the internal state of
+`hackrf_transfer`, which reads the file by itself, bypassing Python):
 
-- `state.playback_start_time` — момент запуска, используется для самой
-  первой, ещё не подтверждённой оценки.
-- `tx.cycle_start_time` / `tx.cycle_count` в `hackrf_tx.py` — обновляются
-  при каждом реальном обнаружении `"Rewind to beginning"` в stderr (см.
-  раздел 5). Это уже не оценка, а факт: как только случился хотя бы один
-  подтверждённый цикл, `/status` начинает отдавать `cycle_position_sec` и
-  `cycle_number`, синхронизированные с реальностью на каждом проходе — без
-  накопления дрейфа на длинных сессиях.
-- Фронтенд (`updateProgress()`) предпочитает подтверждённые данные, откатываясь
-  на оценку по времени (`elapsed_sec % duration_sec`) только пока не
-  случилось ни одного цикла (самое начало первого прохода) или в режиме
-  симуляции без реального `hackrf_transfer`.
+- `state.playback_start_time` — the start moment, used for the very first,
+  not yet confirmed estimate.
+- `tx.cycle_start_time` / `tx.cycle_count` in `hackrf_tx.py` — updated on
+  every real detection of `"Rewind to beginning"` in stderr (see section 5).
+  This is no longer an estimate but a fact: as soon as at least one
+  confirmed cycle has happened, `/status` starts returning
+  `cycle_position_sec` and `cycle_number` synchronized with reality on every
+  pass — without accumulating drift over long sessions.
+- The frontend (`updateProgress()`) prefers the confirmed data, falling back
+  to the time estimate (`elapsed_sec % duration_sec`) only until no cycle has
+  happened yet (the very beginning of the first pass) or in simulation mode
+  without a real `hackrf_transfer`.
 
-### 8. Технический паспорт сигнала (`signal_spec.py`)
+### 8. Signal technical spec (`signal_spec.py`)
 
-Помимо базовых полей (частота, длительность и т.д.) каждый сигнал может
-нести технический паспорт — модуляцию, скорость, FEC и т.п. Все поля
-общие для конвертеров и `main.py` (чтобы не дублировать список в
-нескольких местах), описаны в `backend/signal_spec.py`:
+Besides the basic fields (frequency, duration, etc.), each signal can carry a
+technical data sheet — modulation, rate, FEC and so on. All the fields are
+shared by the converters and `main.py` (to avoid duplicating the list in
+several places) and are described in `backend/signal_spec.py`:
 
-| Поле | Смысл |
+| Field | Meaning |
 |---|---|
-| `modulation` | Тип модуляции (FSK, PSK, MFSK, AFSK, GMSK и т.д.) — самое важное поле |
-| `tone_count` | Порядок модуляции / число тонов (2 = BFSK, 4, 8, 16 = MFSK16 и т.д.) — для FSK/MFSK |
-| `baud_rate` | Символьная скорость, Бод |
-| `shift_hz` | Сдвиг/разнос тонов, Гц — для FSK/MFSK |
-| `bandwidth_hz` | Номинальная полоса сигнала по спецификации, Гц |
-| `bitrate_bps` | Фактическая скорость передачи данных, бит/с — если отличается от baud |
-| `encoding` | Кодирование/алфавит (Baudot, ASCII, Varicode, тональный набор и т.д.) |
-| `fec` | Коррекция ошибок: есть/нет, тип (Viterbi, Reed-Solomon и т.п.) |
-| `interleaving` | Интерливинг: есть/нет (устойчивость к замираниям) |
+| `modulation` | Modulation type (FSK, PSK, MFSK, AFSK, GMSK, etc.) — the most important field |
+| `tone_count` | Modulation order / number of tones (2 = BFSK, 4, 8, 16 = MFSK16, etc.) — for FSK/MFSK |
+| `baud_rate` | Symbol rate, baud |
+| `shift_hz` | Shift/tone spacing, Hz — for FSK/MFSK |
+| `bandwidth_hz` | Nominal signal bandwidth per the specification, Hz |
+| `bitrate_bps` | Actual data rate, bit/s — if different from the baud rate |
+| `encoding` | Encoding/alphabet (Baudot, ASCII, Varicode, tone dialing, etc.) |
+| `fec` | Error correction: present/absent, type (Viterbi, Reed-Solomon, etc.) |
+| `interleaving` | Interleaving: present/absent (fading resistance) |
 
-Все поля необязательные (`None` по умолчанию) и чисто информационные — на
-передачу и на спектр не влияют. В интерфейсе карточка деталей показывает
-только те строки, для которых есть данные — сигнал без паспорта просто не
-показывает этот блок, никакого визуального мусора.
+All the fields are optional (`None` by default) and purely informational —
+they affect neither transmission nor the spectrum. In the interface the
+details card shows only the rows that have data — a signal without a data
+sheet simply does not show this block, no visual clutter.
 
-**Заполнение при конвертации** — оба конвертера принимают все эти поля как
-CLI-флаги (см. таблицы в разделах 2 и 3).
+**Filling in on conversion** — both converters accept all these fields as CLI
+flags (see the tables in sections 2 and 3).
 
-**Правка уже существующей записи** — `tools/annotate_signal.py`: обновляет
-паспортные поля без переконвертации IQ-файла и без пересчёта кэша спектра
-(эти поля никак не влияют ни на файл, ни на спектр). Указываете только те
-флаги, которые хотите изменить — остальные поля записи останутся как есть:
+**Editing an existing entry** — `tools/annotate_signal.py`: updates the data
+sheet fields without reconverting the IQ file and without rebuilding the
+spectrum cache (these fields affect neither the file nor the spectrum).
+Specify only the flags you want to change — the other fields of the entry
+stay as they are:
 ```bash
 cd tools
 python3 annotate_signal.py --id stanag-4285 \
     --modulation "PSK (BPSK/QPSK/8PSK)" --baud-rate 2400 \
-    --bandwidth-hz 3000 --fec "Свёрточное (Витерби)" --interleaving "да"
+    --bandwidth-hz 3000 --fec "Convolutional (Viterbi)" --interleaving "yes"
 ```
 
-Значения в текущей библиотеке взяты только там, где нашлись достоверные
-источники (сайты создателей режимов, ITU-рекомендации, sigidwiki и т.п.) —
-где уверенности не было, поле осталось пустым, а не заполнено правдоподобной
-догадкой. Полная таблица — см. [приложение](#приложение-полный-список-сигналов).
+Values in the current library are taken only where reliable sources were
+found (mode creators' websites, ITU recommendations, sigidwiki, etc.) —
+where there was no certainty, the field is left empty rather than filled
+with a plausible guess. See the [appendix](#appendix-full-signal-list) for
+the full table.
 
-### 9. Экспорт и импорт бандлов
+### 9. Bundle export and import
 
-Формат для передачи сигналов между разными установками программы —
-`.tar`-архив:
+The format for transferring signals between different installations of the
+program is a `.tar` archive:
 ```
 bundle.tar
-├── manifest.json        — список метаданных сигналов (тот же формат, что в library.json)
+├── manifest.json        — list of signal metadata (same format as library.json)
 └── signals/
     ├── <id-1>.cs8
     └── <id-2>.cs8
 ```
-Кэш спектра в архив **не кладётся** — регенерируется на месте у получателя,
-чтобы не завязываться на версию `spectrum_cache.py` на другой машине.
+The spectrum cache is **not put into the archive** — it is regenerated in
+place at the recipient, so as not to depend on the version of
+`spectrum_cache.py` on another machine.
 
-**Экспорт** (`tools/export_bundle.py`) — читает `library.json`, для каждого
-запрошенного (или всех) сигнала копирует его `.cs8` в архив под
-`signals/<file>` и собирает список метаданных в `manifest.json` внутри
-того же архива.
+**Export** (`tools/export_bundle.py`) — reads `library.json`, and for each
+requested (or all) signal copies its `.cs8` into the archive under
+`signals/<file>` and assembles the metadata list into `manifest.json` inside
+the same archive.
 
-**Импорт — только с диска сервера, загрузки через браузер больше нет.**
-Изначально импорт был реализован как обычная загрузка файла в браузере
-(`multipart/form-data`), но на практике это оказалось ненадёжно: для
-бандлов в сотни МБ браузер/starlette иногда не могли разобрать такое
-большое тело запроса (`"There was an error parsing the body"`), из-за чего
-импорт падал без внятной причины. Раз сервер и браузер всё равно работают
-на одной машине, решение — читать `.tar` напрямую с диска (флешка, сетевая
-папка), вообще не гоняя данные через HTTP:
+**Import — only from the server's disk; browser upload is gone.** Import was
+originally implemented as an ordinary file upload in the browser
+(`multipart/form-data`), but in practice this proved unreliable: for bundles
+of hundreds of MB the browser/starlette sometimes could not parse such a
+large request body (`"There was an error parsing the body"`), so the import
+failed for no clear reason. Since the server and the browser run on the same
+machine anyway, the solution is to read the `.tar` directly from disk (USB
+stick, network folder), without pushing the data through HTTP at all:
 
-- **`POST /import-local?path=...`** — запускает импорт в фоновом потоке и
-  сразу возвращает `{"status": "started"}`, не дожидаясь завершения.
-- **`GET /import/status`** — прогресс: текущий шаг (`"Копирование
-  '<id>' (N/M)..."`, `"Построение кэша спектра '<id>' (N/M)..."`), счётчик
-  `done`/`total`, и в конце — результат (`imported: [...]`) либо ошибка.
-- **`GET /import/browse`** — простой файловый браузер для интерфейса:
-  без пути отдаёт список **разрешённых корней**, с путём — содержимое
-  папки (только вложенные папки и файлы `.tar`, остальное не показывается).
+- **`POST /import-local?path=...`** — starts the import in a background
+  thread and immediately returns `{"status": "started"}` without waiting for
+  completion.
+- **`GET /import/status`** — progress: the current step (`"Copying '<id>'
+  (N/M)..."`, `"Building spectrum cache '<id>' (N/M)..."`), the
+  `done`/`total` counter, and at the end — the result (`imported: [...]`) or
+  an error.
+- **`GET /import/browse`** — a simple file browser for the interface:
+  without a path it returns the list of **allowed roots**, with a path — the
+  contents of the folder (only subfolders and `.tar` files; everything else
+  is not shown).
 
-**Разрешённые корни** (`_get_allowed_roots()`) — задаются переменной
-окружения `IMPORT_ALLOWED_ROOTS` (пути через запятую); без неё — разумные
-умолчания: все диски на Windows, стандартные точки автомонтирования флешек
-на Linux/Pi (`/media`, `/mnt`, `/run/media`), а если и их нет — весь корень
-`/`. Ограничение проверяется на двух уровнях — и в самом файловом браузере
-(за пределы разрешённого корня просто не дают зайти), и повторно при
-`/import-local` (даже если обратиться к API напрямую, в обход интерфейса).
-Пример запуска с ограничением конкретной папкой:
+**Allowed roots** (`_get_allowed_roots()`) — set by the `IMPORT_ALLOWED_ROOTS`
+environment variable (comma-separated paths); without it — reasonable
+defaults: all drives on Windows, the standard USB auto-mount points on
+Linux/Pi (`/media`, `/mnt`, `/run/media`), and if those do not exist either —
+the whole root `/`. The restriction is checked at two levels — in the file
+browser itself (you are not allowed to go outside the allowed root) and
+again on `/import-local` (even if the API is called directly, bypassing the
+interface). Example of launching with a restriction to a specific folder:
 ```bash
 IMPORT_ALLOWED_ROOTS=/media/usb uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-**Временная папка для распаковки** — намеренно создаётся **внутри
-`library/`** (`library/_import_tmp`), а не в системном temp по умолчанию.
-На Windows системный temp почти всегда на диске `C:`, и если сама
-библиотека (и место под неё) на другом диске — распаковка большого бандла
-может упереться в нехватку места на `C:`, даже когда на целевом диске
-места полно. Создавая временную папку рядом с `library/`, гарантируем, что
-распаковка происходит на том же диске, куда потом реально копируются
-файлы. При старте сервера эта папка на всякий случай очищается — вдруг
-предыдущий запуск упал посреди распаковки.
+**Temporary folder for unpacking** — deliberately created **inside
+`library/`** (`library/_import_tmp`), not in the default system temp. On
+Windows the system temp is almost always on drive `C:`, and if the library
+itself (and space for it) is on another drive, unpacking a large bundle can
+run out of space on `C:` even when the target drive has plenty. Creating the
+temporary folder next to `library/` guarantees that unpacking happens on the
+same drive the files are then actually copied to. On server startup this
+folder is cleaned just in case — in case the previous run crashed in the
+middle of unpacking.
 
-**Что происходит при импорте** (общая логика — `_import_bundle_from_path`):
-1. Распаковка с проверкой безопасности (`_safe_extract`): для каждого
-   элемента архива проверяется, что итоговый путь не выходит за пределы
-   директории распаковки (защита от **path traversal** —
-   `../../../etc/...`, через `Path.relative_to()` — не через сравнение
-   строк с зашитым разделителем `/`, который ломался на Windows, где
-   реальный разделитель `\`), и что среди элементов нет символических
-   ссылок. На Python 3.12+ дополнительно используется штатный фильтр
-   `tarfile.extractall(filter="data")` (PEP 706) как второй уровень защиты.
-2. Читается `manifest.json`, для каждой записи проверяются обязательные
-   поля (`id`, `name`, `file`, `sample_rate`, `recommended_freq_hz`) —
-   при нехватке хоть одного возвращается ошибка с указанием, каких именно
-   полей не хватает. Отсутствующие необязательные поля (включая весь
-   технический паспорт из раздела 8) заполняются значениями по умолчанию.
-3. `.cs8`-файл сигнала копируется в `library/` под именем `<id>.cs8`
-   (имя всегда берётся от `id`, а не от произвольного имени файла из
-   манифеста — дополнительная защита от подмены пути).
-4. Запись добавляется в `library.json` (`register_signal` — заменяет
-   существующую запись с тем же `id`, если она уже была; в результате
-   помечается `updated: true`/`false` соответственно).
-5. Кэш спектра **строится заново** на месте.
+**What happens on import** (common logic — `_import_bundle_from_path`):
+1. Unpacking with a safety check (`_safe_extract`): for every archive member
+   it checks that the resulting path does not leave the extraction directory
+   (protection against **path traversal** — `../../../etc/...`, via
+   `Path.relative_to()` — not by comparing strings with a hard-coded `/`
+   separator, which broke on Windows, where the real separator is `\`), and
+   that there are no symbolic links among the members. On Python 3.12+ the
+   standard filter `tarfile.extractall(filter="data")` (PEP 706) is
+   additionally used as a second layer of protection.
+2. `manifest.json` is read, and for each entry the required fields (`id`,
+   `name`, `file`, `sample_rate`, `recommended_freq_hz`) are checked — if
+   even one is missing, an error is returned naming which fields are
+   missing. Missing optional fields (including the whole technical data
+   sheet from section 8) are filled with defaults.
+3. The signal's `.cs8` file is copied into `library/` under the name
+   `<id>.cs8` (the name is always taken from `id`, not from an arbitrary
+   file name from the manifest — additional protection against path
+   spoofing).
+4. The entry is added to `library.json` (`register_signal` — replaces an
+   existing entry with the same `id` if there was one; the result is marked
+   `updated: true`/`false` accordingly).
+5. The spectrum cache is **rebuilt** in place.
 
-**В интерфейсе**: кнопка «+ Импорт» открывает модальное окно с файловым
-браузером; клик по `.tar` запускает импорт, окно показывает прогресс-бар
-с текущим шагом. Пока идёт импорт — список файлов в окне блокируется
-(клики не проходят), кнопка закрытия неактивна, закрытие по клику на фон и
-по Escape тоже заблокировано — чтобы нельзя было случайно прервать процесс
-или запутаться, кликнув на другой файл.
+**In the interface**: the "+ Import" button opens a modal window with a file
+browser; clicking a `.tar` starts the import, and the window shows a
+progress bar with the current step. While the import runs, the file list in
+the window is locked (clicks do not go through), the close button is
+inactive, and closing by clicking the backdrop or by Escape is blocked too —
+so that the process cannot be interrupted by accident or confused by
+clicking another file.
 
-Любой сбой на этом пути — в том числе неожиданная ошибка валидации самого
-FastAPI, которая происходит ДО того, как код эндпоинта вообще успевает
-выполниться — гарантированно возвращается в едином, ожидаемом фронтендом
-формате `{"error": "..."}` благодаря двум глобальным обработчикам
-исключений (`@app.exception_handler(Exception)` и отдельно
-`@app.exception_handler(RequestValidationError)` — у FastAPI для
-`RequestValidationError` есть свой обработчик с более высоким приоритетом,
-общий его не перехватывает, нужен отдельный).
+Any failure on this path — including an unexpected FastAPI validation error
+that happens BEFORE the endpoint code even gets to run — is guaranteed to be
+returned in the single format the frontend expects, `{"error": "..."}`,
+thanks to two global exception handlers (`@app.exception_handler(Exception)`
+and, separately, `@app.exception_handler(RequestValidationError)` — FastAPI
+has its own higher-priority handler for `RequestValidationError`, the
+generic one does not catch it, so a separate one is needed).
 
 ---
 
-## Схема library.json
+## library.json schema
 
-Массив объектов, каждый описывает один сигнал:
+An array of objects, each describing one signal:
 
-| Поле | Тип | Обязательное | Смысл |
+| Field | Type | Required | Meaning |
 |---|---|---|---|
-| `id` | строка | да | уникальный идентификатор, используется и как имя файла (`<id>.cs8`) |
-| `name` | строка | да | отображаемое имя в интерфейсе |
-| `file` | строка | да | имя `.cs8`-файла в папке `library/` |
-| `sample_rate` | число | да | частота дискретизации файла, Гц |
-| `recommended_freq_hz` | число | да | рекомендуемая частота передачи, Гц (переопределяется в интерфейсе перед стартом) |
-| `tx_vga_gain` | целое 0–47 | нет (20) | TX VGA gain HackRF по умолчанию, дБ |
-| `amp_enable` | bool | нет (false) | включать ли встроенный усилитель HackRF (+14 дБ) по умолчанию |
-| `sideband` | строка | нет | `usb`/`lsb`/`n/a` — информационное поле, на передачу не влияет |
-| `gain` | число 0..1 | нет | амплитуда, заложенная в сами сэмплы при конвертации — **не меняется на лету**, только пересозданием файла |
-| `loop` | bool | нет (true) | зацикливать ли воспроизведение по умолчанию |
-| `description` | строка | нет | описание, показывается в карточке деталей |
-| `duration_sec` | число | нет | длительность файла, секунд (для отображения) |
-| `spectrum_freq_min_khz` | число | нет (-5.0) | нижняя граница окна спектра на графике, кГц |
-| `spectrum_freq_max_khz` | число | нет (5.0) | верхняя граница окна спектра, кГц |
-| `spectrum_db_min` | число | нет (-100.0) | нижняя граница шкалы амплитуды, дБ |
-| `spectrum_db_max` | число | нет (0.0) | верхняя граница шкалы амплитуды, дБ |
-| `modulation`, `tone_count`, `baud_rate`, `shift_hz`, `bandwidth_hz`, `bitrate_bps`, `encoding`, `fec`, `interleaving` | см. раздел 8 | нет (`None`) | технический паспорт, см. [раздел 8](#8-технический-паспорт-сигнала-signal_specpy) |
+| `id` | string | yes | unique identifier, also used as the file name (`<id>.cs8`) |
+| `name` | string | yes | display name in the interface |
+| `file` | string | yes | name of the `.cs8` file in the `library/` folder |
+| `sample_rate` | number | yes | sample rate of the file, Hz |
+| `recommended_freq_hz` | number | yes | recommended transmit frequency, Hz (overridable in the interface before start) |
+| `tx_vga_gain` | integer 0–47 | no (20) | default HackRF TX VGA gain, dB |
+| `amp_enable` | bool | no (false) | whether to enable the HackRF built-in amplifier (+14 dB) by default |
+| `sideband` | string | no | `usb`/`lsb`/`n/a` — informational field, does not affect transmission |
+| `gain` | number 0..1 | no | amplitude baked into the samples themselves at conversion — **not changeable on the fly**, only by recreating the file |
+| `loop` | bool | no (true) | whether to loop playback by default |
+| `description` | string | no | description shown in the details card |
+| `duration_sec` | number | no | file duration, seconds (for display) |
+| `spectrum_freq_min_khz` | number | no (-5.0) | lower edge of the spectrum window on the plot, kHz |
+| `spectrum_freq_max_khz` | number | no (5.0) | upper edge of the spectrum window, kHz |
+| `spectrum_db_min` | number | no (-100.0) | lower edge of the amplitude scale, dB |
+| `spectrum_db_max` | number | no (0.0) | upper edge of the amplitude scale, dB |
+| `modulation`, `tone_count`, `baud_rate`, `shift_hz`, `bandwidth_hz`, `bitrate_bps`, `encoding`, `fec`, `interleaving` | see section 8 | no (`None`) | technical data sheet, see [section 8](#8-signal-technical-spec-signal_specpy) |
 
-Поля `tx_vga_gain`, `amp_enable`, `loop`, `recommended_freq_hz` — это
-значения **по умолчанию**; интерфейс всегда даёт их переопределить перед
-запуском конкретной передачи, не трогая сам `library.json`.
+The fields `tx_vga_gain`, `amp_enable`, `loop`, `recommended_freq_hz` are
+**default** values; the interface always lets you override them before
+starting a specific transmission, without touching `library.json` itself.
 
 ---
 
-## API бэкенда
+## Backend API
 
-| Метод | Путь | Назначение |
+| Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/signals` | список всех сигналов из `library.json` |
-| `GET` | `/status` | текущее состояние: что играет, фаза (`starting`/`playing`/`null`), эффективные частота/gain/amp/loop, прогресс (`elapsed_sec`, `cycle_position_sec`, `cycle_number`), последняя ошибка |
-| `POST` | `/play/{signal_id}` | запустить передачу. Query-параметры (все опциональные, переопределяют значения из `library.json` только на эту сессию): `freq_hz`, `tx_vga_gain`, `amp_enable`, `loop` |
-| `POST` | `/stop` | остановить текущую передачу |
-| `WS` | `/ws/spectrum` | поток спектра активной трансляции (кадры вида `{"freqs": [...], "db": [...]}`) |
-| `WS` | `/ws/preview/{signal_id}` | предпросмотр спектра сигнала без передачи в HackRF |
-| `POST` | `/import-local?path=...` | запустить импорт бандла с диска сервера (асинхронно, см. раздел 9) |
-| `GET` | `/import/status` | прогресс текущего импорта |
-| `GET` | `/import/browse?path=...` | листинг директории для файлового браузера импорта |
+| `GET` | `/signals` | list of all signals from `library.json` |
+| `GET` | `/status` | current state: what is playing, phase (`starting`/`playing`/`null`), effective frequency/gain/amp/loop, progress (`elapsed_sec`, `cycle_position_sec`, `cycle_number`), last error |
+| `POST` | `/play/{signal_id}` | start transmission. Query parameters (all optional, override the values from `library.json` for this session only): `freq_hz`, `tx_vga_gain`, `amp_enable`, `loop` |
+| `POST` | `/stop` | stop the current transmission |
+| `WS` | `/ws/spectrum` | spectrum stream of the active broadcast (frames like `{"freqs": [...], "db": [...]}`) |
+| `WS` | `/ws/preview/{signal_id}` | spectrum preview of a signal without transmitting to the HackRF |
+| `POST` | `/import-local?path=...` | start importing a bundle from the server's disk (asynchronous, see section 9) |
+| `GET` | `/import/status` | progress of the current import |
+| `GET` | `/import/browse?path=...` | directory listing for the import file browser |
 
-Фаза (`phase`) в `/status` — `"starting"` появляется сразу после запуска
-потока передачи (пока идёт preflight-проверка устройства и старт
-`hackrf_transfer`, это может занять пару секунд), затем сменяется на
-`"playing"`. Фронтенд ждёт именно `null`, чтобы считать передачу
-остановленной — на промежуточных фазах кнопка «Стоп» остаётся активной.
+The phase (`phase`) in `/status` — `"starting"` appears right after the
+transmit thread starts (while the device preflight check and the start of
+`hackrf_transfer` are in progress, which can take a couple of seconds), then
+changes to `"playing"`. The frontend waits specifically for `null` to
+consider the transmission stopped — in the intermediate phases the "Stop"
+button stays active.
 
 ---
 
-## Установка и запуск
+## Installation and running
 
 ```bash
 pip install -r requirements.txt
 ```
 
-`hackrf_transfer` (входит в комплект `hackrf` / PothosSDR) должен быть
-доступен в `PATH`, либо укажите путь явно переменной окружения:
+`hackrf_transfer` (part of the `hackrf` / PothosSDR package) must be
+available in `PATH`, or specify the path explicitly with an environment
+variable:
 
 - Windows (PothosSDR): `set HACKRF_TRANSFER_BIN=D:\Program Files\PothosSDR\bin\hackrf_transfer.exe`
-- Linux / Raspberry Pi: `sudo apt install hackrf` — обычно сразу попадает в `PATH`.
+- Linux / Raspberry Pi: `sudo apt install hackrf` — usually ends up in `PATH` right away.
 
-Если `hackrf_transfer` (сам исполняемый файл) не найден — бэкенд
-автоматически переходит в режим симуляции (см. раздел 5, и важная оговорка
-там же: это не то же самое, что "устройство не подключено" — если бинарник
-есть, а подключения нет, будет настоящая ошибка, а не симуляция), интерфейс
-при этом работает полностью, просто без реальной передачи.
+If `hackrf_transfer` (the executable itself) is not found, the backend
+automatically switches to simulation mode (see section 5, and the important
+caveat there: this is not the same as "the device is not connected" — if the
+binary exists but there is no connection, you get a real error, not
+simulation). The interface works fully, just without real transmission.
 
-Запуск:
+Run:
 ```bash
 cd backend
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
-Открыть `http://localhost:8000`.
+Open `http://localhost:8000`.
 
-Опционально — ограничить, откуда можно импортировать бандлы (см. раздел 9):
+Optionally — restrict where bundles can be imported from (see section 9):
 ```bash
 set IMPORT_ALLOWED_ROOTS=D:\usb-signals
 ```
 
-### Частота дискретизации HackRF
+### HackRF sample rate
 
-Разные сборки `hackrf_transfer` поддерживают разный диапазон: старые (в
-т.ч. которая идёт в PothosSDR) — иногда только фиксированный набор
-8/10/12.5/16/20 МГц; более новые — произвольные значения в диапазоне
-2–20 МГц. **2 МГц проверено вручную и работает стабильно** — это и есть
-значение по умолчанию у конвертеров. Более широкая полоса (для сигналов
-шире нескольких кГц) потребует более высокой частоты — но размер файла и
-время конвертации растут пропорционально.
-
----
-
-## Добавление и аннотирование сигналов
-
-Два инструмента для добавления сигналов, оба сразу и создают файл, и
-регистрируют сигнал, и строят кэш спектра — ничего дополнительно делать не
-нужно:
-
-- **Из WAV-записи HF-сигнала** — `tools/wav_to_iq_library.py` (см.
-  [подробности конвейера](#2-конвертация-wav--iq-wav_to_iq_librarypy)).
-- **Чистый тон/несущая для калибровки** — `tools/generate_sine.py` (см.
-  [подробности](#3-генерация-тестового-тона-generate_sinepy)).
-
-Третий инструмент — **правка технического паспорта уже добавленного
-сигнала** без переконвертации: `tools/annotate_signal.py` (см.
-[раздел 8](#8-технический-паспорт-сигнала-signal_specpy)).
-
-После запуска любого из них сигнал сразу появляется в выпадающем списке
-интерфейса — перезапускать сервер не нужно (список сигналов читается из
-`library.json` заново при каждом обращении к `/signals`).
+Different builds of `hackrf_transfer` support different ranges: older ones
+(including the one shipped with PothosSDR) sometimes support only a fixed set
+of 8/10/12.5/16/20 MHz; newer ones support arbitrary values in the range
+2–20 MHz. **2 MHz has been verified manually and works stably** — it is the
+default of the converters. A wider bandwidth (for signals wider than a few
+kHz) will require a higher rate — but file size and conversion time grow
+proportionally.
 
 ---
 
-## Обмен сигналами между машинами
+## Adding and annotating signals
 
-Экспорт (на машине-источнике):
+There are two tools for adding signals; both create the file, register the
+signal and build the spectrum cache at once — nothing else needs to be done:
+
+- **From a WAV recording of an HF signal** — `tools/wav_to_iq_library.py`
+  (see the [pipeline details](#2-wav-to-iq-conversion-wav_to_iq_librarypy)).
+- **Pure tone/carrier for calibration** — `tools/generate_sine.py` (see the
+  [details](#3-test-tone-generation-generate_sinepy)).
+
+The third tool — **editing the technical data sheet of an already added
+signal** without reconverting: `tools/annotate_signal.py` (see
+[section 8](#8-signal-technical-spec-signal_specpy)).
+
+After running any of them, the signal immediately appears in the
+interface's drop-down list — no server restart is needed (the signal list is
+re-read from `library.json` on every request to `/signals`).
+
+---
+
+## Exchanging signals between machines
+
+Export (on the source machine):
 ```bash
 cd tools
 python3 export_bundle.py --ids stanag-4285 test-tone-1khz --output bundle.tar --library ../library
-# или сразу всю библиотеку:
+# or the whole library at once:
 python3 export_bundle.py --all --output full_export.tar --library ../library
 ```
 
-Импорт (на машине-получателе) — только через интерфейс, кнопка
-«+ Импорт»: она открывает файловый браузер по разрешённым директориям
-сервера (см. [раздел 9](#9-экспорт-и-импорт-бандлов) — как задать, что
-именно разрешено). Скопируйте `.tar` на флешку или в разрешённую сетевую
-папку, вставьте/подключите к машине, где крутится бэкенд, и выберите файл
-в браузере — дальше всё асинхронно, с прогресс-баром. Если в библиотеке
-получателя уже был сигнал с таким же `id` — он будет заменён (в результате
-импорта это явно помечается как «обновлён»).
+Import (on the receiving machine) — only through the interface, the "+
+Import" button: it opens a file browser over the server's allowed
+directories (see [section 9](#9-bundle-export-and-import) for how to set
+what exactly is allowed). Copy the `.tar` to a USB stick or an allowed
+network folder, plug it into / connect it to the machine running the
+backend, and pick the file in the browser — everything after that is
+asynchronous, with a progress bar. If the recipient's library already had a
+signal with the same `id`, it will be replaced (the import result explicitly
+marks this as "updated").
 
-Загрузка бандла через сам браузер (`multipart/form-data`) больше не
-поддерживается — см. [раздел 9](#9-экспорт-и-импорт-бандлов), почему от
-неё отказались.
-
----
-
-## Веб-интерфейс
-
-Левая панель (440px):
-- **Выпадающий список сигналов** + кнопка **«Предпросмотр»** рядом с ним —
-  открывает модальное окно с графиком спектра выбранного сигнала,
-  проигрываемым в цикле, без передачи в эфир. Закрывается крестиком,
-  кликом по фону или клавишей Escape.
-- **Карточка деталей** — рекомендуемая частота, длительность, частота
-  дискретизации, боковая полоса, амплитуда файла, и (если заполнен)
-  **технический паспорт** — модуляция, скорость, FEC и т.д. отдельным
-  блоком; строки, для которых данных нет, просто не показываются.
-- **Частота передачи** — редактируемое поле, предзаполняется рекомендуемой
-  частотой сигнала.
-- **TX VGA gain** — редактируемое поле, 0–47 дБ.
-- **Усилитель** и **Зациклить** — тумблеры.
-- **Прогресс-бар** — появляется только во время передачи (`phase ==
-  "playing"`): заполнение по позиции внутри текущего прохода, подписи
-  `0:15 / 0:27` слева и «Цикл N» справа (для зацикленных сигналов). Синим
-  по времени — пока не случилось ни одного подтверждённого прохода;
-  дальше — по факту, см. [раздел 7](#7-прогресс-воспроизведения).
-- **Старт/Стоп** — внизу панели. Во время передачи весь блок настроек
-  (список, частота, gain, тумблеры) визуально блокируется (тускнеет),
-  кнопка «Предпросмотр» при этом остаётся активной — она никак не мешает
-  идущей передаче.
-
-Правая панель — спектр (линия, с осями и подписями) и водопад
-(прокручивающаяся спектрограмма, та же частотная шкала, тот же отступ
-слева — совпадают визуально). Обе — в монохромной зелёной палитре с лёгким
-свечением, под общий терминальный стиль интерфейса.
-
-Шапка — заголовок и кнопка **«+ Импорт»**, открывающая файловый браузер по
-диску сервера (см. раздел 9).
+Uploading a bundle through the browser itself (`multipart/form-data`) is no
+longer supported — see [section 9](#9-bundle-export-and-import) for why it
+was dropped.
 
 ---
 
-## Перенос на Raspberry Pi 4 (8 ГБ) с тачскрином
+## Web interface
 
-1. Скопировать проект на Pi, `pip install -r requirements.txt`,
+Left panel (440 px):
+- **Signal drop-down list** + a **"Preview"** button next to it — opens a
+  modal window with the spectrum plot of the selected signal, played in a
+  loop, without transmitting on air. Closed by the cross, by clicking the
+  backdrop, or with the Escape key.
+- **Details card** — recommended frequency, duration, sample rate, sideband,
+  file amplitude and (if filled in) the **technical data sheet** —
+  modulation, rate, FEC, etc. as a separate block; rows without data are
+  simply not shown.
+- **Transmit frequency** — an editable field, pre-filled with the signal's
+  recommended frequency.
+- **TX VGA gain** — an editable field, 0–47 dB.
+- **Amplifier** and **Loop** — toggles.
+- **Progress bar** — appears only during transmission (`phase ==
+  "playing"`): filled according to the position within the current pass,
+  with labels like `0:15 / 0:27` on the left and "Cycle N" on the right (for
+  looped signals). Blue while based on time — until no confirmed pass has
+  happened; after that — based on fact, see
+  [section 7](#7-playback-progress).
+- **Start/Stop** — at the bottom of the panel. During transmission the whole
+  settings block (list, frequency, gain, toggles) is visually locked (dimmed);
+  the "Preview" button stays active — it does not interfere with the
+  ongoing transmission in any way.
+
+Right panel — the spectrum (a line, with axes and labels) and the waterfall
+(a scrolling spectrogram, same frequency scale, same left margin — they
+match visually). Both use a monochrome green palette with a slight glow, in
+keeping with the terminal style of the interface.
+
+Header — the title and the **"+ Import"** button, which opens a file browser
+over the server's disk (see section 9).
+
+---
+
+## Porting to Raspberry Pi 4 (8 GB) with a touchscreen
+
+1. Copy the project to the Pi, `pip install -r requirements.txt`,
    `sudo apt install hackrf`.
-2. Интерфейс уже адаптирован под тач: крупные кнопки, без эффектов
-   наведения (`:hover`), обработка `touchstart`.
-3. Автозапуск бэкенда — systemd-юнит:
+2. The interface is already adapted for touch: large buttons, no hover
+   effects (`:hover`), `touchstart` handling.
+3. Backend autostart — a systemd unit:
    ```ini
    # /etc/systemd/system/iq-broadcast.service
    [Unit]
@@ -815,207 +833,211 @@ python3 export_bundle.py --all --output full_export.tar --library ../library
    ```bash
    sudo systemctl enable --now iq-broadcast
    ```
-4. Автозапуск браузера в киоск-режиме (зависит от образа Raspberry Pi OS —
-   автологин + автостарт для LXDE/Wayfire):
+4. Browser autostart in kiosk mode (depends on the Raspberry Pi OS image —
+   autologin + autostart for LXDE/Wayfire):
    ```bash
    chromium-browser --kiosk --noerrdialogs --disable-infobars http://localhost:8000
    ```
-5. Права на USB для HackRF без root: udev-правило
-   (`/etc/udev/rules.d/53-hackrf.rules`, идёт в комплекте пакета `hackrf`)
-   и добавление пользователя `pi` в группу `plugdev`.
-6. Импорт бандлов с флешки — на Linux/Pi это `/media/...` или `/mnt/...`,
-   подхватывается автоматически умолчаниями `IMPORT_ALLOWED_ROOTS` (см.
-   раздел 9), задавать переменную вручную не обязательно.
-7. На Linux вся логика корректной остановки (`SIGINT`) значительно проще,
-   чем на Windows — никакой возни с отдельными консолями не требуется,
-   это чисто windows-специфичная часть `hackrf_tx.py` (код под неё
-   защищён проверкой `IS_WINDOWS` и на Linux просто не выполняется).
+5. USB permissions for the HackRF without root: a udev rule
+   (`/etc/udev/rules.d/53-hackrf.rules`, shipped with the `hackrf` package)
+   and adding the `pi` user to the `plugdev` group.
+6. Importing bundles from a USB stick — on Linux/Pi this is `/media/...` or
+   `/mnt/...`, picked up automatically by the `IMPORT_ALLOWED_ROOTS`
+   defaults (see section 9); setting the variable manually is not required.
+7. On Linux the whole graceful-stop logic (`SIGINT`) is much simpler than on
+   Windows — no fiddling with separate consoles is required; that is a purely
+   Windows-specific part of `hackrf_tx.py` (the code for it is guarded by an
+   `IS_WINDOWS` check and simply does not execute on Linux).
 
 ---
 
-## История отладки и известные грабли
+## Debugging history and known pitfalls
 
-Коротко — что было опробовано и почему отброшено, полезно держать в виду
-при дальнейшей доработке:
+In brief — what was tried and why it was dropped; worth keeping in mind for
+further development:
 
-- **Потоковая подача сэмплов в hackrf_transfer через stdin** (`-t -`) —
-  первый вариант передачи, обрывался через ~1 секунду на Windows с ошибкой
-  `streaming terminated (-1004)`. Причина — недостаточно быстрая и
-  стабильная доставка данных через Python в реальном времени. Чтение того
-  же самого файла с диска (`-t <file>`) оказалось стабильным сколько
-  угодно долго — на этом и остановились.
-- **Рендер под частоту HackRF на лету при каждом play** (из компактного
-  мастер-файла) — работало, но добавляло заметную задержку перед стартом
-  каждой передачи. Заменено на прямую конвертацию в целевой формат один
-  раз при добавлении сигнала.
-- **`terminate()` для остановки hackrf_transfer на Windows** — жёсткое
-  `TerminateProcess()`, не даёт процессу шанса освободить USB-устройство
-  корректно; HackRF оставался в состоянии "передача идёт" до
-  переподключения. Заменено на честный `CTRL_C_EVENT` через отдельный
-  вспомогательный процесс.
-- **`CTRL_BREAK_EVENT` вместо `CTRL_C_EVENT`** — первая попытка честной
-  остановки, не сработала: данная сборка `hackrf_transfer` слушает
-  конкретно `CTRL_C_EVENT` (код `0`), `CTRL_BREAK_EVENT` (код `1`) её
-  обработчиком не распознаётся.
-- **`AttachConsole`/`FreeConsole` прямо в потоке backend-процесса** —
-  вызвало полное зависание сервера: эти вызовы действуют на уровне всего
-  процесса, а не потока, и на короткое время оставляли **весь** `uvicorn`
-  без консоли, из-за чего логирование в других потоках подвисало.
-  Решение — вынести всю эту возню в отдельный короткоживущий
-  вспомогательный процесс.
-- **"Гонка" при быстром stop → play** — сразу после остановки предыдущей
-  передачи HackRF иногда не успевал освободиться, следующий запуск ловил
-  `HackRF not found (-5)`. Решение — `_preflight_check` с несколькими
-  попытками и небольшой задержкой между ними.
-- **Мониторинг stdout вместо stderr для детекции зависания** — первая
-  версия детектора "жив, но завис" слушала stdout `hackrf_transfer`, из-за
-  чего срабатывала ложно почти сразу после старта. Причина — весь
-  диагностический вывод (включая периодические строки статуса) на самом
-  деле идёт в **stderr**, в stdout при `-t <файл>` не пишется ничего.
-  Исправлено переключением на stderr.
-- **Линейная интерполяция при передискретизации создаёт образы (imaging)**
-  — при коэффициенте передискретизации в сотни раз простая линейная
-  интерполяция оставляла паразитный сигнал на частоте `-(fs_исходная -
-  f_сигнала)`, на 20-25 дБ ниже пика. Исправлено добавлением ФНЧ после
-  передискретизации (Баттерворт 8 порядка через SOS-представление —
-  обычное `(b, a)` для такого высокого порядка и низкой нормированной
-  частоты среза оказалось численно неустойчивым и давало `NaN`).
-- **Path traversal защита ломалась на Windows** — проверка безопасного
-  пути при распаковке бандлов сравнивала строки с зашитым Unix-
-  разделителем `/`, а на Windows `Path.resolve()` возвращает пути с `\` —
-  проверка проваливалась для АБСОЛЮТНО ЛЮБОГО файла в архиве, не только
-  вредоносных. Исправлено переходом на `Path.relative_to()`, который
-  работает с объектами `Path`, а не строками, и одинаково корректен на
-  любой ОС.
-- **Системный temp на другом диске, чем библиотека** — распаковка бандла
-  через `tempfile.TemporaryDirectory()` по умолчанию использует системный
-  temp (на Windows почти всегда диск `C:`), из-за чего распаковка большого
-  бандла падала с `No space left on device`, даже когда на диске с самой
-  библиотекой было полно места. Исправлено — временная папка теперь
-  создаётся внутри `library/`, на том же диске, куда файлы копируются
-  в итоге.
-- **Определение дисков на Windows через `Path("D:\\").exists()`** —
-  иногда пытается опросить сам привод и может упасть с ошибкой на пустом
-  CD-приводе/картридере без вставленного носителя, роняя весь список
-  дисков разом из-за одной проблемной буквы. Исправлено переходом на
-  WinAPI `GetLogicalDrives()` — читает таблицу зарегистрированных букв у
-  ОС, не трогая сами устройства.
+- **Streaming samples into hackrf_transfer via stdin** (`-t -`) — the first
+  transmission variant; it broke off after ~1 second on Windows with the
+  error `streaming terminated (-1004)`. The cause was insufficiently fast and
+  stable data delivery through Python in real time. Reading the very same
+  file from disk (`-t <file>`) proved stable for any length of time — that is
+  where we settled.
+- **Rendering to the HackRF rate on the fly on every play** (from a compact
+  master file) — worked, but added a noticeable delay before every
+  transmission start. Replaced by direct conversion to the target format
+  once, when a signal is added.
+- **`terminate()` to stop hackrf_transfer on Windows** — a hard
+  `TerminateProcess()`, gives the process no chance to release the USB
+  device properly; the HackRF stayed in the "transmitting" state until
+  reconnected. Replaced by an honest `CTRL_C_EVENT` via a separate helper
+  process.
+- **`CTRL_BREAK_EVENT` instead of `CTRL_C_EVENT`** — the first attempt at a
+  graceful stop, did not work: this build of `hackrf_transfer` listens
+  specifically for `CTRL_C_EVENT` (code `0`); `CTRL_BREAK_EVENT` (code `1`)
+  is not recognized by its handler.
+- **`AttachConsole`/`FreeConsole` directly in a thread of the backend
+  process** — caused a complete server hang: these calls act at the level of
+  the whole process, not a thread, and for a short time left **the entire**
+  `uvicorn` without a console, which made logging in other threads hang. The
+  solution was to move all this fiddling into a separate short-lived helper
+  process.
+- **A "race" on fast stop → play** — right after the previous transmission
+  was stopped, the HackRF sometimes did not manage to release, and the next
+  start hit `HackRF not found (-5)`. The solution is `_preflight_check` with
+  several attempts and a small delay between them.
+- **Monitoring stdout instead of stderr for hang detection** — the first
+  version of the "alive but hung" detector listened to the stdout of
+  `hackrf_transfer`, and so it fired falsely almost right after start. The
+  cause: all diagnostic output (including periodic status lines) actually
+  goes to **stderr**; nothing is written to stdout with `-t <file>`. Fixed by
+  switching to stderr.
+- **Linear interpolation during resampling creates images** — at a
+  resampling ratio of hundreds, plain linear interpolation left a spurious
+  signal at the frequency `-(fs_source - f_signal)`, 20–25 dB below the peak.
+  Fixed by adding a low-pass filter after resampling (Butterworth order 8 via
+  the SOS representation — the ordinary `(b, a)` for such a high order and
+  low normalized cutoff frequency turned out to be numerically unstable and
+  produced `NaN`).
+- **Path traversal protection broke on Windows** — the safe-path check when
+  unpacking bundles compared strings with a hard-coded Unix separator `/`,
+  while on Windows `Path.resolve()` returns paths with `\` — the check failed
+  for absolutely ANY file in the archive, not only malicious ones. Fixed by
+  switching to `Path.relative_to()`, which works with `Path` objects rather
+  than strings and is equally correct on any OS.
+- **System temp on a different drive than the library** — unpacking a bundle
+  via `tempfile.TemporaryDirectory()` uses the system temp by default (almost
+  always drive `C:` on Windows), so unpacking a large bundle failed with `No
+  space left on device` even when the drive with the library itself had
+  plenty of space. Fixed — the temporary folder is now created inside
+  `library/`, on the same drive the files are ultimately copied to.
+- **Detecting drives on Windows via `Path("D:\\").exists()`** — sometimes
+  tries to query the drive itself and can fail with an error on an empty
+  CD drive/card reader with no media inserted, taking down the entire drive
+  list at once because of one problematic letter. Fixed by switching to the
+  WinAPI `GetLogicalDrives()` — reads the table of registered letters from
+  the OS without touching the devices themselves.
 
 ---
 
-## Безопасность по уровню TX
+## TX level safety
 
-Начинайте с малых значений `tx_vga_gain` (например 10–15) и с выключенным
-`amp_enable`, поднимайте постепенно, контролируя реальную мощность на
-выходе антенного тракта. Значения по умолчанию в библиотеке —
-ориентировочные, не рассчитаны под конкретную антенну/усилитель/юридически
-допустимую мощность на вашей частоте.
+> ⚠️ **Warning.** This software transmits real RF signals. Make sure you are
+> legally permitted to transmit on the chosen frequency and at the chosen
+> power in your jurisdiction (licensing, band plans, emission limits).
+> Prefer a dummy load or a shielded/attenuated test setup over a radiating
+> antenna. You are solely responsible for how you use this software.
+
+Start with small `tx_vga_gain` values (for example 10–15) and with
+`amp_enable` off, raise them gradually, monitoring the real power at the
+output of the antenna path. The default values in the library are
+approximate and are not calculated for a specific antenna/amplifier/legally
+permitted power on your frequency.
 
 ---
 
-## Приложение: полный список сигналов
+## Appendix: full signal list
 
-91 сигнал на момент написания. Прочерк (`—`) — поле не заполнено (нет
-достоверного источника, см. раздел 8). Частоты — рекомендуемые по
-умолчанию, всегда переопределяются в интерфейсе перед запуском.
+91 signals at the time of writing. A dash (`—`) means the field is not filled
+in (no reliable source, see section 8). Frequencies are the recommended
+defaults and can always be overridden in the interface before starting.
 
-| ID | Название | Частота, МГц | Модуляция | Тонов | Baud | Сдвиг, Гц | Полоса, Гц | Битрейт, бит/с | FEC |
+| ID | Name | Frequency, MHz | Modulation | Tones | Baud | Shift, Hz | Bandwidth, Hz | Bitrate, bit/s | FEC |
 |---|---|---|---|---|---|---|---|---|---|
 | **STANAG/MIL** | | | | | | | | | |
-| `ale-400` | MIL/NATO ALE | 11 | FSK (8-ary) | 8 | 125 | 250 | — | 375 | Голей (24,12) |
-| `mil-188-110-16tone` | MIL-STD-188-110A App.B (16-тон) | 9.4 | DPSK (16 параллельных тонов) | 16 | — | — | — | — | — |
-| `mil-188-110-39tone` | MIL-STD-188-110A App.B (39-тон) | 9.8 | DPSK (39 параллельных тонов) | 39 | — | — | — | — | — |
-| `mil-188-110a` | MIL-STD-188-110A | 9 | PSK (2..8-PSK) | — | 2400 | — | 3000 | — | Свёрточное (Витерби) |
-| `mil-188-110b` | MIL-STD-188-110B | 9 | PSK (2..8-PSK) | — | 2400 | — | 3000 | — | Свёрточное (Витерби), опционально Рид-Соломон |
-| `mil-188-141a` | MIL-STD-188-141A (ALE) | 13 | FSK (8-ary) | 8 | 125 | 250 | — | 375 | Голей (24,12) |
-| `mil-188-141b` | MIL-STD-188-141B (ALE) | 13.4 | FSK (8-ary) | 8 | 125 | 250 | — | 375 | Голей (24,12) |
+| `ale-400` | MIL/NATO ALE | 11 | FSK (8-ary) | 8 | 125 | 250 | — | 375 | Golay (24,12) |
+| `mil-188-110-16tone` | MIL-STD-188-110A App.B (16-tone) | 9.4 | DPSK (16 parallel tones) | 16 | — | — | — | — | — |
+| `mil-188-110-39tone` | MIL-STD-188-110A App.B (39-tone) | 9.8 | DPSK (39 parallel tones) | 39 | — | — | — | — | — |
+| `mil-188-110a` | MIL-STD-188-110A | 9 | PSK (2..8-PSK) | — | 2400 | — | 3000 | — | Convolutional (Viterbi) |
+| `mil-188-110b` | MIL-STD-188-110B | 9 | PSK (2..8-PSK) | — | 2400 | — | 3000 | — | Convolutional (Viterbi), optional Reed-Solomon |
+| `mil-188-141a` | MIL-STD-188-141A (ALE) | 13 | FSK (8-ary) | 8 | 125 | 250 | — | 375 | Golay (24,12) |
+| `mil-188-141b` | MIL-STD-188-141B (ALE) | 13.4 | FSK (8-ary) | 8 | 125 | 250 | — | 375 | Golay (24,12) |
 | `mil-m-55529a` | MIL-M-55529A | 16.3 | FSK | — | — | — | — | — | — |
-| `stanag-4285` | STANAG-4285 | 5 | PSK (BPSK/QPSK/8PSK, зависит от скорости) | — | 2400 | — | 3000 | — | Свёрточное (Витерби) |
-| `stanag-4415` | STANAG-4415 | 6.2 | — | — | — | — | — | 75 | Каскадное помехоустойчивое кодирование (для работы при очень низком SNR) |
-| `stanag-4481-fsk` | STANAG-4481 (FSK) | 4.5 | FSK (синхронный) | — | 75 | 850 | — | — | — |
-| `stanag-4481-psk` | STANAG-4481 (PSK) | 10.5 | BPSK (одна поднесущая 1800 Гц) | — | 2400 | — | — | 300 | Свёрточное, скорость кода 1/4 |
-| `stanag-4529` | STANAG-4529 | 12 | PSK (BPSK/QPSK/8PSK, зависит от скорости) | — | 1200 | — | 1240 | — | Свёрточное (как у STANAG 4285/4539) |
-| **Авиация/служебное** | | | | | | | | | |
-| `chu` | CHU (сигнал времени) | 7.85 | AM (голос) + BCD-код времени на поднесущей 1000 Гц | — | — | — | 3000 | — | нет |
-| `dsc-hf` | DSC (ГМССБ, КВ) | 8.415 | FSK (2 тона) | — | 100 | 170 | — | — | Обнаружение ошибок + повтор символа |
+| `stanag-4285` | STANAG-4285 | 5 | PSK (BPSK/QPSK/8PSK, depends on rate) | — | 2400 | — | 3000 | — | Convolutional (Viterbi) |
+| `stanag-4415` | STANAG-4415 | 6.2 | — | — | — | — | — | 75 | Concatenated error-correction coding (for operation at very low SNR) |
+| `stanag-4481-fsk` | STANAG-4481 (FSK) | 4.5 | FSK (synchronous) | — | 75 | 850 | — | — | — |
+| `stanag-4481-psk` | STANAG-4481 (PSK) | 10.5 | BPSK (single 1800 Hz subcarrier) | — | 2400 | — | — | 300 | Convolutional, code rate 1/4 |
+| `stanag-4529` | STANAG-4529 | 12 | PSK (BPSK/QPSK/8PSK, depends on rate) | — | 1200 | — | 1240 | — | Convolutional (same as STANAG 4285/4539) |
+| **Aviation/utility** | | | | | | | | | |
+| `chu` | CHU (time signal) | 7.85 | AM (voice) + BCD time code on a 1000 Hz subcarrier | — | — | — | 3000 | — | none |
+| `dsc-hf` | DSC (GMDSS, HF) | 8.415 | FSK (2 tones) | — | 100 | 170 | — | — | Error detection + symbol repetition |
 | `hf-acars` | HF-ACARS | 8.834 | MSK | — | 300 | — | — | 300 | — |
-| `icao-selcal` | ICAO SELCAL | 10.1 | Двухтональный (пары одновременных тонов) | 16 | 1 | — | — | — | нет |
+| `icao-selcal` | ICAO SELCAL | 10.1 | Two-tone (pairs of simultaneous tones) | 16 | 1 | — | — | — | none |
 | **MFSK** | | | | | | | | | |
 | `alis-2` | ALIS-2 | 12.5 | MFSK | — | — | — | — | — | — |
 | `aum-13` | AUM-13 | 12.9 | MFSK | — | — | — | — | — | — |
 | `cis-36-mfsk` | CIS-36 (MFSK) | 12.1 | MFSK | — | — | — | — | — | — |
-| `coquelet-13` | Coquelet-13 | 13.7 | FSK (Coquelet, многоканальный) | — | — | — | — | — | — |
-| `coquelet-8` | Coquelet-8 | 13.3 | FSK (Coquelet, многоканальный) | — | — | — | — | — | — |
-| `coquelet-80` | Coquelet-80 | 14.5 | FSK (Coquelet, многоканальный) | — | — | — | — | — | — |
-| `mfsk-16` | MFSK-16 | 10.9 | MFSK | 16 | 15.625 | 15.625 | 316 | — | Свёрточное (R=1/2, K=7, NASA) |
+| `coquelet-13` | Coquelet-13 | 13.7 | FSK (Coquelet, multichannel) | — | — | — | — | — | — |
+| `coquelet-8` | Coquelet-8 | 13.3 | FSK (Coquelet, multichannel) | — | — | — | — | — | — |
+| `coquelet-80` | Coquelet-80 | 14.5 | FSK (Coquelet, multichannel) | — | — | — | — | — | — |
+| `mfsk-16` | MFSK-16 | 10.9 | MFSK | 16 | 15.625 | 15.625 | 316 | — | Convolutional (R=1/2, K=7, NASA) |
 | `mfsk-20` | MFSK-20 | 11.3 | MFSK | — | — | — | — | — | — |
-| `mfsk-8` | MFSK-8 | 10.5 | MFSK | 8 | 7.8125 | 7.8125 | — | — | Свёрточное (R=1/2, K=7, NASA) |
-| `olivia` | Olivia MFSK | 7.073 | MFSK | 32 | 31.25 | 31.25 | 1000 | — | Встроенное избыточное кодирование (устойчивое к глубоким замираниям) |
+| `mfsk-8` | MFSK-8 | 10.5 | MFSK | 8 | 7.8125 | 7.8125 | — | — | Convolutional (R=1/2, K=7, NASA) |
+| `olivia` | Olivia MFSK | 7.073 | MFSK | 32 | 31.25 | 31.25 | 1000 | — | Built-in redundant coding (resilient to deep fading) |
 | `piccolo-mk6` | Piccolo MK6 | 15.3 | MFSK (Piccolo) | — | — | — | — | — | — |
 | `sp-14` | SP-14 | 11.7 | MFSK | 13 | — | — | — | — | — |
-| `twinplex` | Twinplex | 15.7 | FSK (сдвоенный канал) | — | — | — | — | — | — |
+| `twinplex` | Twinplex | 15.7 | FSK (twin channel) | — | — | — | — | — | — |
 | **PSK** | | | | | | | | | |
 | `alfrds` | ALFRDS | 21.7 | PSK | — | — | — | — | — | — |
 | `cis-12` | CIS-12 | 20.5 | PSK | — | — | — | — | — | — |
-| `clover-2` | CLOVER-II | 18.9 | Адаптивная PSK/QAM (CLOVER) | — | — | — | — | — | — |
-| `clover-2000` | CLOVER-2000 | 19.3 | Адаптивная PSK/QAM (CLOVER) | — | — | — | — | — | — |
-| `codan-9001` | CODAN 9001 Selcall | 19.7 | Тональный селективный вызов (CODAN) | — | — | — | — | — | — |
+| `clover-2` | CLOVER-II | 18.9 | Adaptive PSK/QAM (CLOVER) | — | — | — | — | — | — |
+| `clover-2000` | CLOVER-2000 | 19.3 | Adaptive PSK/QAM (CLOVER) | — | — | — | — | — | — |
+| `codan-9001` | CODAN 9001 Selcall | 19.7 | Tone selective calling (CODAN) | — | — | — | — | — | — |
 | `gw-psk` | Globe Wireless PSK | 20.1 | PSK (Globe Wireless HF Network) | — | — | — | — | — | — |
-| `pactor-ii` | PACTOR-II | 20.9 | DPSK (адаптивно, 2/4-DPSK) | — | — | — | — | — | Memory ARQ + Хаффман-сжатие |
-| `pactor-ii-fec` | PACTOR-II FEC | 21.3 | DPSK (адаптивно, 2/4-DPSK) | — | — | — | — | — | FEC (широковещательный режим) |
-| `pactor-iii` | PACTOR-III | 14.1 | DPSK/16-DPSK (адаптивно) | — | — | — | 2200 | — | Свёрточное + memory ARQ |
-| `psk-10` | PSK-10 | 16.9 | BPSK | — | 10 | — | — | — | нет |
-| `psk-125f` | PSK-125F | 17.7 | BPSK/QPSK (с FEC) | — | 125 | — | — | — | Свёрточное (R=1/2, K=5) |
-| `psk-220f` | PSK-220F | 18.1 | BPSK/QPSK (с FEC) | — | 220 | — | — | — | Свёрточное (аналогично PSK63F/125F) |
-| `psk-31` | PSK-31 | 16.1 | BPSK | — | 31.25 | — | 80 | — | нет |
-| `psk-31-fec` | PSK-31 FEC | 16.5 | BPSK | — | 31.25 | — | — | — | Повтор бита через 13 позиций (временное разнесение) |
-| `psk-63f` | PSK-63F | 17.3 | BPSK/QPSK (с FEC) | — | 62.5 | — | — | — | Свёрточное (R=1/2, K=5) |
-| `psk-am` | PSK-AM | 18.5 | PSK+AM (гибридная) | — | — | — | — | — | — |
+| `pactor-ii` | PACTOR-II | 20.9 | DPSK (adaptive, 2/4-DPSK) | — | — | — | — | — | Memory ARQ + Huffman compression |
+| `pactor-ii-fec` | PACTOR-II FEC | 21.3 | DPSK (adaptive, 2/4-DPSK) | — | — | — | — | — | FEC (broadcast mode) |
+| `pactor-iii` | PACTOR-III | 14.1 | DPSK/16-DPSK (adaptive) | — | — | — | 2200 | — | Convolutional + memory ARQ |
+| `psk-10` | PSK-10 | 16.9 | BPSK | — | 10 | — | — | — | none |
+| `psk-125f` | PSK-125F | 17.7 | BPSK/QPSK (with FEC) | — | 125 | — | — | — | Convolutional (R=1/2, K=5) |
+| `psk-220f` | PSK-220F | 18.1 | BPSK/QPSK (with FEC) | — | 220 | — | — | — | Convolutional (similar to PSK63F/125F) |
+| `psk-31` | PSK-31 | 16.1 | BPSK | — | 31.25 | — | 80 | — | none |
+| `psk-31-fec` | PSK-31 FEC | 16.5 | BPSK | — | 31.25 | — | — | — | Bit repetition over 13 positions (time diversity) |
+| `psk-63f` | PSK-63F | 17.3 | BPSK/QPSK (with FEC) | — | 62.5 | — | — | — | Convolutional (R=1/2, K=5) |
+| `psk-am` | PSK-AM | 18.5 | PSK+AM (hybrid) | — | — | — | — | — | — |
 | **FSK/ARQ** | | | | | | | | | |
 | `alis` | ALIS | 3.4 | FSK | — | — | — | — | — | — |
 | `arq-e` | ARQ-E | 3.8 | FSK | — | — | 170 | — | — | — |
 | `arq-e3` | ARQ-E3 | 4.2 | FSK | — | — | — | — | — | — |
-| `arq-m2-242` | ARQ-M2-242 | 4.6 | FSK (2-канальный мультиплекс) | — | — | — | — | — | — |
-| `arq-m2-342` | ARQ-M2-342 | 5.4 | FSK (2-канальный мультиплекс) | — | — | — | — | — | — |
-| `arq-m4-242` | ARQ-M4-242 | 5.8 | FSK (4-канальный мультиплекс) | — | — | — | — | — | — |
-| `arq-m4-342` | ARQ-M4-342 | 6.6 | FSK (4-канальный мультиплекс) | — | — | — | — | — | — |
+| `arq-m2-242` | ARQ-M2-242 | 4.6 | FSK (2-channel multiplex) | — | — | — | — | — | — |
+| `arq-m2-342` | ARQ-M2-342 | 5.4 | FSK (2-channel multiplex) | — | — | — | — | — | — |
+| `arq-m4-242` | ARQ-M4-242 | 5.8 | FSK (4-channel multiplex) | — | — | — | — | — | — |
+| `arq-m4-342` | ARQ-M4-342 | 6.6 | FSK (4-channel multiplex) | — | — | — | — | — | — |
 | `arq-n` | ARQ-N | 7 | FSK | — | — | — | — | — | — |
 | `arq6-90` | ARQ6-90 | 7.4 | FSK | — | — | — | — | — | — |
 | `arq6-98` | ARQ6-98 | 7.8 | FSK | — | — | — | — | — | — |
 | `ascii-br6028` | ASCII BR-6028 | 9.6 | FSK | — | — | — | — | — | — |
 | `ascii-fsk` | ASCII (FSK) | 9.2 | FSK | — | — | — | — | — | — |
 | `autospec` | Autospec | 10.3 | FSK | — | — | — | — | — | — |
-| `baudot` | Baudot (RTTY) | 10.7 | FSK | — | — | — | — | — | нет |
+| `baudot` | Baudot (RTTY) | 10.7 | FSK | — | — | — | — | — | none |
 | `bulg-ascii` | Bulgarian ASCII | 11.1 | FSK | — | — | — | — | — | — |
 | `cis-11` | CIS-11 | 11.5 | FSK | — | — | — | — | — | — |
 | `cis-14` | CIS-14 | 11.9 | FSK | — | — | — | — | — | — |
 | `cis-36-50` | CIS-36/50 | 12.3 | FSK | — | — | — | — | — | — |
 | `cis-50-50` | CIS-50/50 | 12.7 | FSK | — | — | — | — | — | — |
-| `dup-arq` | DUP-ARQ | 13.1 | FSK (дуплексный ARQ) | — | — | — | — | — | — |
-| `dup-arq-2` | DUP-ARQ-2 | 13.5 | FSK (дуплексный ARQ) | — | — | — | — | — | — |
-| `dup-fec-2` | DUP-FEC-2 | 13.9 | FSK (дуплексный FEC) | — | — | — | — | — | — |
+| `dup-arq` | DUP-ARQ | 13.1 | FSK (duplex ARQ) | — | — | — | — | — | — |
+| `dup-arq-2` | DUP-ARQ-2 | 13.5 | FSK (duplex ARQ) | — | — | — | — | — | — |
+| `dup-fec-2` | DUP-FEC-2 | 13.9 | FSK (duplex FEC) | — | — | — | — | — | — |
 | `fec-a` | FEC-A | 14.3 | FSK | — | — | — | — | — | — |
-| `g-tor` | G-TOR | 14.7 | Адаптивная (FSK/GMSK) | — | — | — | — | — | Рид-Соломон + Хаффман-сжатие |
+| `g-tor` | G-TOR | 14.7 | Adaptive (FSK/GMSK) | — | — | — | — | — | Reed-Solomon + Huffman compression |
 | `gw-fsk` | Globe Wireless FSK | 15.1 | FSK (Globe Wireless HF Network) | — | — | — | — | — | — |
 | `hc-arq` | HC-ARQ | 15.5 | FSK (ARQ) | — | — | — | — | — | — |
-| `hng-fec` | Венгерский FEC | 15.9 | FSK | — | — | — | — | — | — |
-| `packet-300` | AX.25 Packet 300 | 16.7 | AFSK (Bell 103) | — | 300 | 200 | — | 300 | нет (CRC для обнаружения ошибок) |
-| `pactor` | PACTOR-I | 17.1 | FSK (2 тона) | — | 100 | 200 | — | — | Memory ARQ + Хаффман-сжатие |
-| `pactor-fec` | PACTOR FEC | 17.5 | FSK (2 тона) | — | 100 | 200 | — | — | FEC (широковещательный режим) |
+| `hng-fec` | Hungarian FEC | 15.9 | FSK | — | — | — | — | — | — |
+| `packet-300` | AX.25 Packet 300 | 16.7 | AFSK (Bell 103) | — | 300 | 200 | — | 300 | none (CRC for error detection) |
+| `pactor` | PACTOR-I | 17.1 | FSK (2 tones) | — | 100 | 200 | — | — | Memory ARQ + Huffman compression |
+| `pactor-fec` | PACTOR FEC | 17.5 | FSK (2 tones) | — | 100 | 200 | — | — | FEC (broadcast mode) |
 | `pol-arq` | POL-ARQ | 17.9 | FSK | — | — | — | — | — | — |
-| `rum-fec` | Румынский FEC | 18.3 | FSK | — | — | — | — | — | — |
+| `rum-fec` | Romanian FEC | 18.3 | FSK | — | — | — | — | — | — |
 | `si-arq` | SI-ARQ | 18.7 | FSK | — | — | — | — | — | — |
 | `si-fec` | SI-FEC | 19.1 | FSK | — | — | — | — | — | — |
-| `sitor-arq` | SITOR-ARQ | 8.4 | FSK (2 тона) | 2 | 100 | 170 | 400 | — | Обнаружение ошибок (CCIR-476) + ARQ-переспрос |
-| `sitor-fec` | SITOR-FEC | 3 | FSK (2 тона) | 2 | 100 | 170 | — | — | SITOR-B/FEC (каждый символ дважды) |
+| `sitor-arq` | SITOR-ARQ | 8.4 | FSK (2 tones) | 2 | 100 | 170 | 400 | — | Error detection (CCIR-476) + ARQ retransmission |
+| `sitor-fec` | SITOR-FEC | 3 | FSK (2 tones) | 2 | 100 | 170 | — | — | SITOR-B/FEC (each character sent twice) |
 | `spread-51` | Spread-51 | 19.5 | FSK | — | — | — | — | — | — |
 | `swed-arq` | SWED-ARQ | 19.9 | FSK | — | — | — | — | — | — |
-| **Графика/CW** | | | | | | | | | |
-| `cw-morse` | CW / Морзе | 20.7 | OOK (CW) | — | — | — | — | — | нет |
-| `feldhell` | Feld-Hell | 21.1 | OOK (Hellschreiber) | — | 122.5 | — | 75 | — | нет |
-| `fmhell` | FM-Hell | 21.5 | MSK (вариант Hellschreiber) | — | — | — | — | — | нет |
-| `press-fax` | Press-Fax | 21.9 | FM (частотно-модулированный факс) | — | — | — | — | — | нет |
-| `sstv` | SSTV | 20.3 | FM (аналоговая) | — | — | — | — | — | нет |
-| `weatherfax` | Weatherfax | 22.3 | FM (частотно-модулированный факс) | — | — | — | — | — | нет |
-| **Служебное** | | | | | | | | | |
-| `test-tone-1khz` | Тестовый тон +1 кГц | 14 | Немодулированный тон | 1 | — | — | — | — | нет |
+| **Graphics/CW** | | | | | | | | | |
+| `cw-morse` | CW / Morse | 20.7 | OOK (CW) | — | — | — | — | — | none |
+| `feldhell` | Feld-Hell | 21.1 | OOK (Hellschreiber) | — | 122.5 | — | 75 | — | none |
+| `fmhell` | FM-Hell | 21.5 | MSK (Hellschreiber variant) | — | — | — | — | — | none |
+| `press-fax` | Press-Fax | 21.9 | FM (frequency-modulated fax) | — | — | — | — | — | none |
+| `sstv` | SSTV | 20.3 | FM (analog) | — | — | — | — | — | none |
+| `weatherfax` | Weatherfax | 22.3 | FM (frequency-modulated fax) | — | — | — | — | — | none |
+| **Utility** | | | | | | | | | |
+| `test-tone-1khz` | Test tone +1 kHz | 14 | Unmodulated tone | 1 | — | — | — | — | none |
