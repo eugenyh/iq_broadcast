@@ -39,3 +39,6 @@ Thumbs.db
 
 #spectrum cache files
 *.npz
+
+#ZIPed library
+library.zip
